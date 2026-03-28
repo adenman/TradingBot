@@ -1,0 +1,23 @@
+{
+    "portfolio": {
+        "initial_balance": 384.19,
+        "cash": 200.0,
+        "holdings": {
+            "BTC/USD": 0.00264025
+        },
+        "cost_basis": {
+            "BTC/USD": 66872.68
+        },
+        "total_value": 192.37,
+        "total_profit": -7.63,
+        "total_fees": 6.1999
+    },
+    "settings": {
+        "strategy": "GRID",
+        "grid_upper": 72000.0,
+        "grid_lower": 60000.0,
+        "grid_levels": 50,
+        "trade_size_usd": 10.0,
+        "risk_pct": 0.3
+    }
+}
