@@ -135,6 +135,11 @@ def compute_indicators_series(df: pd.DataFrame) -> pd.DataFrame:
     df["vol_ratio"] = v / df["vol_sma"].replace(0, np.nan)
     df["vol_ratio"] = df["vol_ratio"].fillna(1.0)
 
+    # Stochastic RSI (14)
+    rsi_min = df["rsi"].rolling(14).min()
+    rsi_max = df["rsi"].rolling(14).max()
+    df["stoch_rsi"] = ((df["rsi"] - rsi_min) / (rsi_max - rsi_min).replace(0, np.nan) * 100).fillna(50)
+
     return df
 
 
@@ -213,21 +218,25 @@ class GridBacktest:
 
         trend_1m  = row.get("trend", "NEUTRAL")
         trend_5m  = row.get("trend_5m", "NEUTRAL")
-        stoch_rsi = row.get("rsi", 50)          # using RSI as proxy
+        stoch_rsi = row.get("stoch_rsi", 50)
         vol_ratio = row.get("vol_ratio", 1.0)
+        mtf_agreement = (trend_1m == trend_5m) and trend_1m != "NEUTRAL"
 
+        # Volume filter
         if self.config.get("volume_filter") and vol_ratio < 0.6:
             return False
 
+        # MTF agreement = grid is working as intended, allow freely
+        if self.config.get("mtf_trend_filter", True) and mtf_agreement:
+            return True
+
         if action == "BUY":
-            if trend_1m == "BEARISH" and trend_5m == "BEARISH" and stoch_rsi > 35:
-                return False
-            if trend_1m == "BEARISH" and stoch_rsi > 35:
+            # Block falling knife: both TFs bearish AND not yet oversold
+            if trend_1m == "BEARISH" and trend_5m == "BEARISH" and stoch_rsi > 60:
                 return False
         elif action == "SELL":
-            if trend_1m == "BULLISH" and trend_5m == "BULLISH" and stoch_rsi < 65:
-                return False
-            if trend_1m == "BULLISH" and stoch_rsi < 65:
+            # Block only extreme capitulation: both TFs bearish AND stoch crushed
+            if trend_1m == "BEARISH" and trend_5m == "BEARISH" and stoch_rsi < 20:
                 return False
         return True
 

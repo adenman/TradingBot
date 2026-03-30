@@ -119,6 +119,10 @@ state = {
     "last_volume_update": 0,
     "current_volume_tick": 0.0,         # Accumulating volume within current candle
     "current_volume_5m_tick": 0.0,
+    "tick_count": 0,                     # Ticks in current 1m candle
+    "tick_count_5m": 0,                  # Ticks in current 5m candle
+    "tick_history": [],                  # Rolling history of ticks per 1m candle (last 20)
+    "tick_history_5m": [],               # Rolling history of ticks per 5m candle (last 20)
 }
 
 # --- PERSISTENCE ---
@@ -453,10 +457,11 @@ def check_cooldown(level_idx):
 
 def check_trend_filter(action):
     """
-    Multi-timeframe trend filter:
-    - Primary: 1m EMA crossover + Stoch RSI
-    - Confirmation: 5m trend agreement (when mtf_trend_filter enabled)
-    - Volume: require above-average volume (when volume_filter enabled)
+    Grid-aware trend filter:
+    - Grid bots PROFIT by selling into strength and buying into weakness.
+    - Only block in extreme scenarios (clear capitulation/falling knife).
+    - MTF agreement = grid is working as intended, allow all trades freely.
+    - Volume filter uses real tick-based volume ratio.
     """
     if not state["settings"]["trend_filter"]:
         return True
@@ -468,28 +473,24 @@ def check_trend_filter(action):
     mtf_agreement = ind.get("mtf_agreement", False)
     volume_ratio = ind.get("volume_ratio", 1.0)
 
-    # Volume filter: skip trades on suspiciously low volume (below 60% of average)
-    if state["settings"].get("volume_filter", True) and volume_ratio < 0.6:
-        return False
+    # Volume filter: only apply when we have enough tick history (real data)
+    if state["settings"].get("volume_filter", True):
+        if len(state.get("tick_history", [])) >= 5 and volume_ratio < 0.6:
+            return False
+
+    # MTF agreement: grid is working as intended — allow all trades freely
+    if state["settings"].get("mtf_trend_filter", True) and mtf_agreement:
+        return True
 
     if action == "BUY":
-        # Hard block: 1m bearish AND 5m bearish AND stoch not oversold = falling knife
-        if trend_1m == "BEARISH" and trend_5m == "BEARISH" and stoch_rsi > 25:
+        # Only block clear falling knife: BOTH TFs bearish AND not yet oversold
+        if trend_1m == "BEARISH" and trend_5m == "BEARISH" and stoch_rsi > 60:
             return False
-        # Soft block: 1m bearish but 5m neutral/bullish = allow with stoch check
-        if trend_1m == "BEARISH" and stoch_rsi > 35:
-            return False
-        # MTF boost: if both timeframes agree bullish, always allow
-        if state["settings"].get("mtf_trend_filter", True) and mtf_agreement and trend_1m == "BULLISH":
-            return True
         return True
 
     elif action == "SELL":
-        # Hard block: 1m bullish AND 5m bullish AND not overbought = don't sell into pump
-        if trend_1m == "BULLISH" and trend_5m == "BULLISH" and stoch_rsi < 75:
-            return False
-        # Soft block: 1m bullish but 5m neutral/bearish = allow with stoch check
-        if trend_1m == "BULLISH" and stoch_rsi < 65:
+        # Only block in extreme capitulation dump (price in freefall, don't sell into hole)
+        if trend_1m == "BEARISH" and trend_5m == "BEARISH" and stoch_rsi < 20:
             return False
         return True
 
@@ -684,23 +685,34 @@ async def evaluate_grid(symbol, price):
         state["grid_state"]["current_index"] = next_idx
         curr_idx = next_idx
 
-    # --- Price moved DOWN: BUY signals ---
-    curr_idx = state["grid_state"]["current_index"]
-    while curr_idx > 0 and trades_this_tick < max_trades_per_tick:
-        level_below = levels[curr_idx - 1]
-        if price > level_below:
-            break
-
-        next_idx = curr_idx - 1
-        if str(next_idx) not in state["grid_state"]["filled_levels"]:
-            if check_cooldown(next_idx) and check_trend_filter("BUY"):
-                if state["portfolio"]["cash"] >= trade_size:
-                    success = await execute_trade(symbol, "BUY", price, trade_size, level_idx=next_idx)
-                    if success:
-                        trades_this_tick += 1
-
         state["grid_state"]["current_index"] = next_idx
         curr_idx = next_idx
+
+    # --- Trailing Take-Profit scan ---
+    if state["settings"].get("trailing_take_profit", True):
+        tp_pct = state["settings"].get("trailing_tp_pct", 1.5) / 100.0
+        lock_pct = state["settings"].get("profit_lock_pct", 0.5) / 100.0
+
+        for level_key in list(gs["filled_levels"].keys()):
+            fill = gs["filled_levels"].get(level_key)
+            if not fill:
+                continue
+            entry = fill.get("entry_price", 0)
+            if entry <= 0:
+                continue
+
+            if not fill.get("trailing_active", False):
+                if price >= entry * (1.0 + tp_pct):
+                    fill["trailing_active"] = True
+                    fill["trail_high"] = price
+                    await log_event(f"🎯 Trailing TP activated for Grid #{level_key} @ ${price:.2f} (entry ${entry:.2f})")
+            else:
+                if price > fill.get("trail_high", 0):
+                    fill["trail_high"] = price
+                trail_high = fill.get("trail_high", price)
+                if price <= trail_high * (1.0 - lock_pct):
+                    await log_event(f"🔒 Trailing TP triggered for Grid #{level_key} @ ${price:.2f} (high ${trail_high:.2f})")
+                    await execute_trade(symbol, "SELL", price, get_trade_size(price), level_idx=int(level_key))
 
 
 async def process_price_update(symbol, price, volume=0.0):
@@ -714,10 +726,19 @@ async def process_price_update(symbol, price, volume=0.0):
     state["current_volume_tick"] = state.get("current_volume_tick", 0.0) + volume
     state["current_volume_5m_tick"] = state.get("current_volume_5m_tick", 0.0) + volume
 
+    # Tick counters — real activity proxy (count WebSocket price updates per candle)
+    state["tick_count"] = state.get("tick_count", 0) + 1
+    state["tick_count_5m"] = state.get("tick_count_5m", 0) + 1
+
     # Update 1-min candle history
     if now - state.get("last_history_update", 0) >= 60:
         state["history"][symbol].append(price)
         state["volume_history"][symbol].append(state["current_volume_tick"])
+        # Save tick count for this completed candle
+        state["tick_history"].append(state["tick_count"])
+        if len(state["tick_history"]) > 20:
+            state["tick_history"].pop(0)
+        state["tick_count"] = 0
         state["current_volume_tick"] = 0.0
         if len(state["history"][symbol]) > 200:
             state["history"][symbol].pop(0)
@@ -731,6 +752,10 @@ async def process_price_update(symbol, price, volume=0.0):
     if now - state.get("last_5m_update", 0) >= 300:
         state["history_5m"][symbol].append(price)
         state["volume_5m"][symbol].append(state["current_volume_5m_tick"])
+        state["tick_history_5m"].append(state["tick_count_5m"])
+        if len(state["tick_history_5m"]) > 20:
+            state["tick_history_5m"].pop(0)
+        state["tick_count_5m"] = 0
         state["current_volume_5m_tick"] = 0.0
         if len(state["history_5m"][symbol]) > 100:
             state["history_5m"][symbol].pop(0)
@@ -740,11 +765,22 @@ async def process_price_update(symbol, price, volume=0.0):
         if len(state["history_5m"][symbol]) > 0:
             state["history_5m"][symbol][-1] = price
 
-    # Recalculate indicators with volume
+    # Compute real tick-based volume ratio
+    tick_hist = state.get("tick_history", [])
+    if len(tick_hist) >= 3:
+        avg_ticks = float(np.mean(tick_hist[-20:]))
+        current_ticks = float(state.get("tick_count", 0))
+        tick_vol_ratio = (current_ticks / avg_ticks) if avg_ticks > 0 else 1.0
+    else:
+        tick_vol_ratio = 1.0
+
+    # Recalculate indicators
     state["indicators"][symbol] = calculate_all_indicators(
         state["history"][symbol],
         volumes=state["volume_history"][symbol]
     )
+    # Override volume_ratio with real tick-based value
+    state["indicators"][symbol]["volume_ratio"] = round(tick_vol_ratio, 3)
 
     # Portfolio value tracking
     h_val = round(float(state["portfolio"]["holdings"][symbol] * price), 2)
