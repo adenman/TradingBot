@@ -175,7 +175,7 @@ export default function App() {
 
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
-    const ws = new WebSocket('ws://localhost:8000/ws');
+    const ws = new WebSocket('wss://eloy-precedentless-nonprohibitorily.ngrok-free.dev/ws');
     wsRef.current = ws;
     ws.onopen = () => { setConn('Connected'); clearTimeout(reconnRef.current); };
     ws.onmessage = (e) => {
