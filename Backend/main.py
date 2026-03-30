@@ -215,7 +215,6 @@ async def log_event(message: str):
     state["logs"].insert(0, formatted)
     if len(state["logs"]) > 100:
         state["logs"].pop()
-    save_state()
     await manager.broadcast_state()
 
 
@@ -546,12 +545,23 @@ def update_stats(action, pnl, trade_usd):
         if pnl > 0:
             stats["winning_trades"] += 1
             stats["largest_win"] = max(stats["largest_win"], pnl)
+            # Rolling avg win
+            n = stats["winning_trades"]
+            stats["avg_win"] = round(((stats["avg_win"] * (n - 1)) + pnl) / n, 4)
         else:
             stats["losing_trades"] += 1
             stats["largest_loss"] = min(stats["largest_loss"], pnl)
+            # Rolling avg loss
+            n = stats["losing_trades"]
+            stats["avg_loss"] = round(((stats["avg_loss"] * (n - 1)) + pnl) / n, 4)
 
     total = stats["winning_trades"] + stats["losing_trades"]
     stats["win_rate"] = round((stats["winning_trades"] / total * 100) if total > 0 else 0, 1)
+
+    # Profit factor = gross wins / gross losses
+    gross_wins = stats["avg_win"] * stats["winning_trades"] if stats["winning_trades"] > 0 else 0
+    gross_losses = abs(stats["avg_loss"]) * stats["losing_trades"] if stats["losing_trades"] > 0 else 0
+    stats["profit_factor"] = round(gross_wins / gross_losses, 2) if gross_losses > 0 else (float("inf") if gross_wins > 0 else 0.0)
 
     if state["portfolio"]["total_value"] > stats["peak_value"]:
         stats["peak_value"] = round(state["portfolio"]["total_value"], 2)
@@ -594,9 +604,8 @@ async def execute_trade(symbol, action, current_price, trade_usd_amount, level_i
 
         update_stats("BUY", 0, trade_usd_amount)
         await log_event(f"💰 BUY ${trade_usd_amount:.2f} @ ${exec_price:.2f} (Fee: ${fee:.4f}) [Grid #{level_idx}]")
-        # Trade marker for chart
-        state["trade_markers"].append({"time": datetime.now().strftime("%H:%M"), "action": "BUY", "price": round(exec_price, 2)})
-        if len(state["trade_markers"]) > 50: state["trade_markers"].pop(0)
+        state["trade_markers"].append({"time": datetime.now().strftime("%m/%d %H:%M"), "action": "BUY", "price": round(exec_price, 2)})
+        if len(state["trade_markers"]) > 500: state["trade_markers"].pop(0)
         return True
 
     elif action == "SELL":
@@ -639,9 +648,8 @@ async def execute_trade(symbol, action, current_price, trade_usd_amount, level_i
         update_stats("SELL", pnl, sale_value)
         pnl_emoji = "✅" if pnl >= 0 else "❌"
         await log_event(f"🤝 SELL ${sale_value:.2f} @ ${exec_price:.2f} (Fee: ${fee:.4f}) P&L: {pnl_emoji}${pnl:.2f} [Grid #{level_idx}]")
-        # Trade marker for chart
-        state["trade_markers"].append({"time": datetime.now().strftime("%H:%M"), "action": "SELL", "price": round(exec_price, 2)})
-        if len(state["trade_markers"]) > 50: state["trade_markers"].pop(0)
+        state["trade_markers"].append({"time": datetime.now().strftime("%m/%d %H:%M"), "action": "SELL", "price": round(exec_price, 2)})
+        if len(state["trade_markers"]) > 500: state["trade_markers"].pop(0)
         return True
 
     return False
@@ -696,6 +704,21 @@ async def evaluate_grid(symbol, price):
 
         state["grid_state"]["current_index"] = next_idx
         curr_idx = next_idx
+
+    # --- Price moved DOWN: BUY signals ---
+    curr_idx = state["grid_state"]["current_index"]
+    while curr_idx > 0 and trades_this_tick < max_trades_per_tick:
+        level_below = levels[curr_idx - 1]
+        if price > level_below:
+            break
+
+        next_idx = curr_idx - 1
+        if str(next_idx) not in state["grid_state"]["filled_levels"]:
+            if check_cooldown(next_idx) and check_trend_filter("BUY"):
+                if state["portfolio"]["cash"] >= trade_size:
+                    success = await execute_trade(symbol, "BUY", price, trade_size, level_idx=next_idx)
+                    if success:
+                        trades_this_tick += 1
 
         state["grid_state"]["current_index"] = next_idx
         curr_idx = next_idx
@@ -786,6 +809,9 @@ async def process_price_update(symbol, price, volume=0.0):
     else:
         tick_vol_ratio = 1.0
 
+    # Track whether a new candle just closed this tick
+    candle_closed = (now - state.get("last_history_update", 0)) < 2.0 and len(state["history"][symbol]) > 0
+
     # Recalculate indicators
     state["indicators"][symbol] = calculate_all_indicators(
         state["history"][symbol],
@@ -794,8 +820,8 @@ async def process_price_update(symbol, price, volume=0.0):
     # Override volume_ratio with real tick-based value
     state["indicators"][symbol]["volume_ratio"] = round(tick_vol_ratio, 3)
 
-    # Update price chart on candle close (1m), keep up to 1 week (10080 candles)
-    if now - state.get("last_history_update", 0) >= 60:
+    # Update price chart and equity history on candle close only
+    if candle_closed:
         ts_str = datetime.now().strftime("%m/%d %H:%M")
         state["price_chart"].append({"time": ts_str, "price": round(price, 2)})
         if len(state["price_chart"]) > 10080:
@@ -808,6 +834,9 @@ async def process_price_update(symbol, price, volume=0.0):
         })
         if len(state["equity_history"]) > 10080:
             state["equity_history"].pop(0)
+
+        # Periodic save (every candle close, ~60s)
+        save_state()
 
     # Portfolio value tracking
     h_val = round(float(state["portfolio"]["holdings"][symbol] * price), 2)
