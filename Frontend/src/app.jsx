@@ -158,6 +158,15 @@ export default function App() {
   const [chartTab, setChartTab] = useState('price');
   const [priceWindow, setPriceWindow] = useState(60);
   const [eqWindow, setEqWindow] = useState(60);
+
+  const WINDOWS = [
+    { label: '1hr',  value: 60 },
+    { label: '3hr',  value: 180 },
+    { label: '6hr',  value: 360 },
+    { label: '1d',   value: 1440 },
+    { label: '3d',   value: 4320 },
+    { label: '1w',   value: 10080 },
+  ];
   const [form, setForm] = useState({});
   const [toggles, setToggles] = useState({});
   const wsRef = useRef(null);
@@ -348,19 +357,19 @@ export default function App() {
           <div style={cardTitle}>Chart</div>
           <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', alignItems: 'center' }}>
             {/* Window preset buttons */}
-            {chartTab === 'price' && [15, 30, 60, 120].map(w => (
-              <button key={w} onClick={() => setPriceWindow(w)} style={{
+            {chartTab === 'price' && WINDOWS.map(w => (
+              <button key={w.value} onClick={() => setPriceWindow(w.value)} style={{
                 padding: '3px 10px', borderRadius: '5px', fontSize: '0.72rem', fontWeight: 600, cursor: 'pointer', border: 'none',
-                backgroundColor: priceWindow === w ? C.blue : C.subtle,
-                color: priceWindow === w ? '#fff' : C.muted,
-              }}>{w === 120 ? 'All' : `${w}m`}</button>
+                backgroundColor: priceWindow === w.value ? C.blue : C.subtle,
+                color: priceWindow === w.value ? '#fff' : C.muted,
+              }}>{w.label}</button>
             ))}
-            {chartTab === 'equity' && [15, 30, 60, 120].map(w => (
-              <button key={w} onClick={() => setEqWindow(w)} style={{
+            {chartTab === 'equity' && WINDOWS.map(w => (
+              <button key={w.value} onClick={() => setEqWindow(w.value)} style={{
                 padding: '3px 10px', borderRadius: '5px', fontSize: '0.72rem', fontWeight: 600, cursor: 'pointer', border: 'none',
-                backgroundColor: eqWindow === w ? C.green : C.subtle,
-                color: eqWindow === w ? '#fff' : C.muted,
-              }}>{w === 120 ? 'All' : `${w}m`}</button>
+                backgroundColor: eqWindow === w.value ? C.green : C.subtle,
+                color: eqWindow === w.value ? '#fff' : C.muted,
+              }}>{w.label}</button>
             ))}
             <div style={{ width: '1px', height: '18px', backgroundColor: C.border, margin: '0 4px' }} />
             {/* Chart type tabs */}

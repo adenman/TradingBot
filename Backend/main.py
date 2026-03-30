@@ -123,7 +123,7 @@ state = {
     "tick_count_5m": 0,                  # Ticks in current 5m candle
     "tick_history": [],                  # Rolling history of ticks per 1m candle (last 20)
     "tick_history_5m": [],               # Rolling history of ticks per 5m candle (last 20)
-    "price_chart": [],                   # Last 120 1m closes for charting [{time, price}]
+    "price_chart": [],                   # 1m candle closes for charting [{time, price}] — up to 10080 (1 week)
     "equity_history": [],                # Portfolio value over time [{time, value, pnl}]
     "trade_markers": [],                 # Recent trades for chart overlay [{time, action, price}]
 }
@@ -199,9 +199,9 @@ def get_broadcast_payload():
             "open_positions": len(state["grid_state"]["filled_levels"]),
         },
         "circuit_breaker": state["circuit_breaker"],
-        "price_chart": state["price_chart"][-120:],
-        "equity_history": state["equity_history"][-120:],
-        "trade_markers": state["trade_markers"][-50:],
+        "price_chart": state["price_chart"][-10080:],   # up to 1 week of 1m candles
+        "equity_history": state["equity_history"][-10080:],
+        "trade_markers": state["trade_markers"][-500:],
     }
 
 
@@ -794,20 +794,19 @@ async def process_price_update(symbol, price, volume=0.0):
     # Override volume_ratio with real tick-based value
     state["indicators"][symbol]["volume_ratio"] = round(tick_vol_ratio, 3)
 
-    # Update price chart (one point per tick, keeping last 120)
-    ts_str = datetime.now().strftime("%H:%M")
-    state["price_chart"].append({"time": ts_str, "price": round(price, 2)})
-    if len(state["price_chart"]) > 120:
-        state["price_chart"].pop(0)
+    # Update price chart on candle close (1m), keep up to 1 week (10080 candles)
+    if now - state.get("last_history_update", 0) >= 60:
+        ts_str = datetime.now().strftime("%m/%d %H:%M")
+        state["price_chart"].append({"time": ts_str, "price": round(price, 2)})
+        if len(state["price_chart"]) > 10080:
+            state["price_chart"].pop(0)
 
-    # Update equity history on each candle close (every 60s)
-    if now - state.get("last_history_update", 0) < 1:  # just closed a candle
         state["equity_history"].append({
             "time": ts_str,
             "value": round(state["portfolio"]["total_value"], 2),
             "pnl": round(state["portfolio"]["total_profit"], 2),
         })
-        if len(state["equity_history"]) > 120:
+        if len(state["equity_history"]) > 10080:
             state["equity_history"].pop(0)
 
     # Portfolio value tracking
@@ -875,8 +874,8 @@ async def warmup_indicators(internal_symbol="BTC/USD"):
     closes = state["history"][internal_symbol]
     now_ts = int(time.time())
     state["price_chart"] = [
-        {"time": datetime.fromtimestamp(now_ts - (len(closes) - i) * 60).strftime("%H:%M"), "price": round(p, 2)}
-        for i, p in enumerate(closes[-120:])
+        {"time": datetime.fromtimestamp(now_ts - (len(closes) - i) * 60).strftime("%m/%d %H:%M"), "price": round(p, 2)}
+        for i, p in enumerate(closes[-10080:])
     ]
     await log_event(f"✅ Warmup complete. 1m trend: {state['indicators'][internal_symbol]['trend']} | 5m trend: {state['indicators'][internal_symbol]['trend_5m']}")
 
