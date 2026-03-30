@@ -30,6 +30,20 @@ CB_API_KEY_NAME = os.getenv("COINBASE_API_KEY_NAME", "")
 CB_PRIVATE_KEY  = os.getenv("COINBASE_PRIVATE_KEY", "").replace("\\n", "\n")
 CB_REST_URL     = "https://api.coinbase.com"
 
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
+
+async def tg_notify(message: str):
+    """Send a Telegram message notification."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        async with aiohttp.ClientSession() as session:
+            await session.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"})
+    except Exception as e:
+        logger.error(f"Telegram notify failed: {e}")
+
 # ── Coinbase Advanced Trade API Auth ─────────────────────────────────────────
 
 def _cb_jwt_token(method: str, path: str) -> str:
@@ -663,6 +677,7 @@ def check_circuit_breaker():
         cb["cooldown_until"] = time.time() + 300
         cb["reason"] = f"Drawdown {max_dd:.1f}% exceeded {state['settings']['drawdown_limit_pct']}% limit"
         logger.warning(f"🔴 CIRCUIT BREAKER: {cb['reason']}")
+        asyncio.create_task(tg_notify(f"🚨 <b>CIRCUIT BREAKER</b>\n{cb['reason']}\nTrading paused for 5 minutes."))
         return True
 
     return False
@@ -811,6 +826,7 @@ async def execute_trade(symbol, action, current_price, trade_usd_amount, level_i
 
         update_stats("BUY", 0, trade_usd_amount)
         await log_event(f"💰 BUY ${trade_usd_amount:.2f} @ ${exec_price:.2f} (Fee: ${fee:.4f}) [Grid #{level_idx}]")
+        await tg_notify(f"💰 <b>BUY</b> ${trade_usd_amount:.2f} @ ${exec_price:.2f}\nGrid #{level_idx} | Fee: ${fee:.4f}\nCash left: ${state['portfolio']['cash']:.2f}")
         state["trade_markers"].append({"time": datetime.now().strftime("%m/%d %H:%M"), "action": "BUY", "price": round(exec_price, 2)})
         if len(state["trade_markers"]) > 500: state["trade_markers"].pop(0)
         return True
@@ -855,6 +871,7 @@ async def execute_trade(symbol, action, current_price, trade_usd_amount, level_i
         update_stats("SELL", pnl, sale_value)
         pnl_emoji = "✅" if pnl >= 0 else "❌"
         await log_event(f"🤝 SELL ${sale_value:.2f} @ ${exec_price:.2f} (Fee: ${fee:.4f}) P&L: {pnl_emoji}${pnl:.2f} [Grid #{level_idx}]")
+        await tg_notify(f"🤝 <b>SELL</b> ${sale_value:.2f} @ ${exec_price:.2f}\nP&L: {pnl_emoji} ${pnl:.2f} | Fee: ${fee:.4f}\nGrid #{level_idx} | Total P&L: ${state['portfolio']['realized_pnl']:.2f}")
         state["trade_markers"].append({"time": datetime.now().strftime("%m/%d %H:%M"), "action": "SELL", "price": round(exec_price, 2)})
         if len(state["trade_markers"]) > 500: state["trade_markers"].pop(0)
         return True
