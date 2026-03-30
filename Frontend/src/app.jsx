@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   AreaChart, Area, LineChart, Line, BarChart, Bar,
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
-  ReferenceLine, Dot,
+  ReferenceLine, Dot, Brush,
 } from 'recharts';
 
 // ── Palette ──────────────────────────────────────────────────────────────────
@@ -371,6 +371,7 @@ export default function App() {
                 {gs?.range_high > 0 && <ReferenceLine y={gs.range_high} stroke={C.red} strokeDasharray="4 3" strokeOpacity={0.5} label={{ value: 'Grid High', fill: C.red, fontSize: 10, position: 'right' }} />}
                 {gs?.range_low > 0 && <ReferenceLine y={gs.range_low} stroke={C.green} strokeDasharray="4 3" strokeOpacity={0.5} label={{ value: 'Grid Low', fill: C.green, fontSize: 10, position: 'right' }} />}
                 <Area type="monotone" dataKey="price" stroke={C.blue} strokeWidth={2} fill="url(#priceGrad)" name="BTC Price" dot={<TradeDot />} activeDot={{ r: 4, fill: C.blue }} isAnimationActive={false} />
+                <Brush dataKey="time" height={24} stroke={C.border} fill="#0e1117" travellerWidth={8} startIndex={Math.max(0, priceData.length - 60)} />
               </AreaChart>
             </ResponsiveContainer>
           ) : (
@@ -397,6 +398,7 @@ export default function App() {
                   <Tooltip content={<ChartTooltip />} />
                   <ReferenceLine y={pf?.initial_balance} stroke={C.yellow} strokeDasharray="6 3" strokeOpacity={0.5} />
                   <Area type="monotone" dataKey="value" stroke={C.green} strokeWidth={2} fill="url(#eqGrad)" name="Equity $" dot={false} isAnimationActive={false} />
+                  <Brush dataKey="time" height={24} stroke={C.border} fill="#0e1117" travellerWidth={8} startIndex={Math.max(0, (equity_history||[]).length - 60)} />
                 </AreaChart>
               </ResponsiveContainer>
               <div style={{ marginTop: '12px' }}>
