@@ -44,6 +44,8 @@ state = {
         "max_open_positions": 10,        # Max grid levels with open buys
         "fee_rate": 0.006,               # Coinbase taker fee (0.6%)
         "slippage_rate": 0.0005,         # Simulated slippage (0.05%)
+        "volume_filter": True,           # Require above-average volume for trades
+        "mtf_trend_filter": True,        # Use 5m candles for multi-timeframe confirmation
     },
     "grid_state": {
         "initialized": False,
@@ -56,8 +58,10 @@ state = {
         "range_low": 0.0,
     },
     "prices": {"BTC/USD": 0.0},
-    "history": {"BTC/USD": []},
+    "history": {"BTC/USD": []},          # 1-min closes
+    "volume_history": {"BTC/USD": []},   # 1-min volumes (aligned with history)
     "history_5m": {"BTC/USD": []},       # 5-min candles for multi-timeframe
+    "volume_5m": {"BTC/USD": []},        # 5-min volumes
     "indicators": {
         "BTC/USD": {
             "rsi": 50.0,
@@ -66,9 +70,13 @@ state = {
             "volatility": 0.0,
             "atr": 0.0,
             "ema_fast": 0.0, "ema_slow": 0.0,
-            "trend": "NEUTRAL",          # BULLISH | BEARISH | NEUTRAL
+            "trend": "NEUTRAL",          # BULLISH | BEARISH | NEUTRAL (1m)
             "trend_strength": 0.0,       # 0.0 to 1.0
+            "trend_5m": "NEUTRAL",       # 5m timeframe trend
+            "trend_strength_5m": 0.0,
+            "mtf_agreement": False,      # True when 1m and 5m trend agree
             "volume_sma": 0.0,
+            "volume_ratio": 1.0,         # Current volume / SMA (>1 = above average)
             "stoch_rsi": 50.0,
         }
     },
@@ -108,6 +116,9 @@ state = {
     },
     "last_history_update": 0,
     "last_5m_update": 0,
+    "last_volume_update": 0,
+    "current_volume_tick": 0.0,         # Accumulating volume within current candle
+    "current_volume_5m_tick": 0.0,
 }
 
 # --- PERSISTENCE ---
@@ -117,7 +128,6 @@ def load_state():
             with open(STATE_FILE, 'r') as f:
                 saved_data = json.load(f)
                 state["portfolio"].update(saved_data.get("portfolio", {}))
-                # Merge settings carefully - keep new defaults for keys not in saved
                 saved_settings = saved_data.get("settings", {})
                 for k, v in saved_settings.items():
                     if k in state["settings"]:
@@ -130,9 +140,7 @@ def load_state():
 
 def save_state():
     try:
-        serializable_grid = {
-            k: v for k, v in state["grid_state"].items()
-        }
+        serializable_grid = {k: v for k, v in state["grid_state"].items()}
         with open(STATE_FILE, 'w') as f:
             json.dump({
                 "portfolio": state["portfolio"],
@@ -167,7 +175,6 @@ class ConnectionManager:
 
 
 def get_broadcast_payload():
-    """Build a clean payload to send to the frontend (avoids sending huge arrays)."""
     return {
         "prices": state["prices"],
         "portfolio": state["portfolio"],
@@ -203,12 +210,10 @@ async def log_event(message: str):
 
 
 def calculate_fees(amount_usd):
-    """Coinbase Advanced Trade taker fee."""
     return round(float(amount_usd * state["settings"]["fee_rate"]), 4)
 
 
 def calculate_atr(prices, period=14):
-    """Average True Range from close prices (approximation without high/low)."""
     if len(prices) < period + 1:
         return 0.0
     diffs = np.abs(np.diff(prices[-(period + 1):]))
@@ -216,7 +221,6 @@ def calculate_atr(prices, period=14):
 
 
 def calculate_stoch_rsi(prices, rsi_period=14, stoch_period=14):
-    """Stochastic RSI for overbought/oversold with more sensitivity than RSI."""
     if len(prices) < rsi_period + stoch_period:
         return 50.0
 
@@ -224,7 +228,6 @@ def calculate_stoch_rsi(prices, rsi_period=14, stoch_period=14):
     gains = np.where(delta > 0, delta, 0.0)
     losses = np.where(delta < 0, -delta, 0.0)
 
-    # Calculate rolling RSI values
     rsi_values = []
     for i in range(rsi_period, len(delta) + 1):
         avg_gain = np.mean(gains[i - rsi_period:i])
@@ -247,14 +250,42 @@ def calculate_stoch_rsi(prices, rsi_period=14, stoch_period=14):
     return float(np.clip(stoch, 0, 100))
 
 
-def calculate_all_indicators(prices):
-    """Full indicator suite for dashboard + trading decisions."""
+def calculate_trend(arr_series):
+    """Returns (trend_str, trend_strength) from a price series."""
+    s = pd.Series(arr_series)
+    ema_fast = float(s.ewm(span=9, adjust=False).mean().iloc[-1])
+    ema_slow = float(s.ewm(span=21, adjust=False).mean().iloc[-1])
+    if ema_fast > ema_slow * 1.001:
+        trend = "BULLISH"
+        strength = min((ema_fast - ema_slow) / ema_slow * 100, 1.0)
+    elif ema_fast < ema_slow * 0.999:
+        trend = "BEARISH"
+        strength = min((ema_slow - ema_fast) / ema_slow * 100, 1.0)
+    else:
+        trend = "NEUTRAL"
+        strength = 0.0
+    return trend, float(strength), float(ema_fast), float(ema_slow)
+
+
+def calculate_volume_sma(volumes, period=20):
+    """Volume SMA and ratio of current volume to average."""
+    if len(volumes) < 2:
+        return 0.0, 1.0
+    arr = np.array(volumes[-period:], dtype=float)
+    sma = float(np.mean(arr))
+    current = float(volumes[-1]) if volumes else 0.0
+    ratio = current / sma if sma > 0 else 1.0
+    return round(sma, 4), round(ratio, 3)
+
+
+def calculate_all_indicators(prices, volumes=None):
+    """Full indicator suite including volume and multi-timeframe trend."""
     if len(prices) < 30:
         return state["indicators"]["BTC/USD"]
 
     arr = np.array(prices, dtype=float)
 
-    # --- RSI (Wilder's smoothed) ---
+    # --- RSI ---
     delta = np.diff(arr)
     gain = delta.clip(min=0)
     loss = -delta.clip(max=0)
@@ -266,7 +297,7 @@ def calculate_all_indicators(prices):
     else:
         rsi = 50.0
 
-    # --- Bollinger Bands (20-period) ---
+    # --- Bollinger Bands ---
     recent20 = arr[-20:]
     sma20 = float(np.mean(recent20))
     std20 = float(np.std(recent20))
@@ -281,29 +312,32 @@ def calculate_all_indicators(prices):
     macd_signal = macd_line.ewm(span=9, adjust=False).mean()
     macd_histogram = macd_line - macd_signal
 
-    # --- EMAs for trend (9 fast, 21 slow) ---
-    ema_fast = float(s.ewm(span=9, adjust=False).mean().iloc[-1])
-    ema_slow = float(s.ewm(span=21, adjust=False).mean().iloc[-1])
+    # --- 1m Trend ---
+    trend_1m, strength_1m, ema_fast, ema_slow = calculate_trend(arr)
 
-    # --- Trend determination ---
-    if ema_fast > ema_slow * 1.001:
-        trend = "BULLISH"
-        trend_strength = min((ema_fast - ema_slow) / ema_slow * 100, 1.0)
-    elif ema_fast < ema_slow * 0.999:
-        trend = "BEARISH"
-        trend_strength = min((ema_slow - ema_fast) / ema_slow * 100, 1.0)
+    # --- 5m Trend (multi-timeframe) ---
+    prices_5m = state["history_5m"].get("BTC/USD", [])
+    if len(prices_5m) >= 10:
+        trend_5m, strength_5m, _, _ = calculate_trend(np.array(prices_5m, dtype=float))
     else:
-        trend = "NEUTRAL"
-        trend_strength = 0.0
+        trend_5m, strength_5m = "NEUTRAL", 0.0
+
+    # Multi-timeframe agreement
+    mtf_agreement = (trend_1m == trend_5m) and trend_1m != "NEUTRAL"
 
     # --- ATR ---
     atr = calculate_atr(arr)
 
-    # --- Volatility (mean absolute change of recent ticks) ---
+    # --- Volatility ---
     volatility = float(np.mean(np.abs(np.diff(arr[-15:])))) if len(arr) >= 15 else 0.0
 
     # --- Stochastic RSI ---
     stoch_rsi = calculate_stoch_rsi(arr)
+
+    # --- Volume ---
+    vol_sma, vol_ratio = 0.0, 1.0
+    if volumes and len(volumes) >= 2:
+        vol_sma, vol_ratio = calculate_volume_sma(volumes)
 
     return {
         "rsi": float(rsi),
@@ -317,26 +351,27 @@ def calculate_all_indicators(prices):
         "atr": float(atr),
         "ema_fast": float(ema_fast),
         "ema_slow": float(ema_slow),
-        "trend": trend,
-        "trend_strength": float(trend_strength),
+        "trend": trend_1m,
+        "trend_strength": float(strength_1m),
+        "trend_5m": trend_5m,
+        "trend_strength_5m": float(strength_5m),
+        "mtf_agreement": mtf_agreement,
+        "volume_sma": float(vol_sma),
+        "volume_ratio": float(vol_ratio),
         "stoch_rsi": float(stoch_rsi),
-        "volume_sma": 0.0,  # Placeholder until we add volume data
     }
 
 # --- ADAPTIVE GRID ENGINE ---
 
 def compute_dynamic_grid_range(current_price, atr):
-    """Auto-calculate grid range from ATR so the grid always surrounds the price."""
     multiplier = state["settings"]["atr_multiplier"]
     half_range = atr * multiplier
-    # Ensure minimum range of 1% of price
     min_range = current_price * 0.01
     half_range = max(half_range, min_range)
     return current_price - half_range, current_price + half_range
 
 
 def initialize_grid(current_price):
-    """Calculate price levels for the grid. Can use auto-range or manual bounds."""
     settings = state["settings"]
     atr = state["indicators"]["BTC/USD"].get("atr", 0)
 
@@ -346,7 +381,6 @@ def initialize_grid(current_price):
         upper = settings["grid_upper"] if settings["grid_upper"] > 0 else current_price * 1.03
         lower = settings["grid_lower"] if settings["grid_lower"] > 0 else current_price * 0.97
 
-    # Safety: ensure valid range
     if upper <= lower:
         upper = current_price * 1.03
         lower = current_price * 0.97
@@ -357,7 +391,6 @@ def initialize_grid(current_price):
     state["grid_state"]["range_high"] = upper
     state["grid_state"]["range_low"] = lower
 
-    # Find closest grid line to current price
     closest_idx = min(range(len(grid_array)), key=lambda i: abs(grid_array[i] - current_price))
     state["grid_state"]["current_index"] = closest_idx
     state["grid_state"]["initialized"] = True
@@ -368,7 +401,6 @@ def initialize_grid(current_price):
 
 
 def should_rebalance_grid(current_price):
-    """Check if the grid needs to be recentered around the price."""
     gs = state["grid_state"]
     if not gs["initialized"] or not state["settings"]["auto_range"]:
         return False
@@ -378,20 +410,15 @@ def should_rebalance_grid(current_price):
     if now - gs["last_rebalance"] < interval:
         return False
 
-    # Rebalance if price is in the outer 15% of the grid range
     grid_range = gs["range_high"] - gs["range_low"]
     if grid_range <= 0:
         return True
     position_in_range = (current_price - gs["range_low"]) / grid_range
 
-    if position_in_range < 0.15 or position_in_range > 0.85:
-        return True
-
-    return False
+    return position_in_range < 0.15 or position_in_range > 0.85
 
 
 def get_trade_size(current_price):
-    """Scale trade size based on volatility and position in Bollinger Bands."""
     base_size = state["settings"]["trade_size_usd"]
     if not state["settings"]["volatility_scaling"]:
         return base_size
@@ -404,18 +431,14 @@ def get_trade_size(current_price):
     if bb_upper <= bb_lower or bb_mid == 0:
         return base_size
 
-    # Scale up when price is near BB extremes (mean-reversion opportunity)
     bb_range = bb_upper - bb_lower
     distance_from_mid = abs(current_price - bb_mid)
     bb_position = distance_from_mid / (bb_range / 2) if bb_range > 0 else 0
-
-    # 1.0x at middle, up to 2.0x at BB edges
     scale_factor = 1.0 + min(bb_position, 1.0)
 
-    # Also scale with volatility: higher vol = slightly larger trades (more profit per grid)
     atr = ind.get("atr", 0)
     if atr > 0 and bb_mid > 0:
-        vol_ratio = atr / bb_mid * 1000  # Normalized
+        vol_ratio = atr / bb_mid * 1000
         vol_scale = min(1.0 + vol_ratio * 0.5, 1.5)
         scale_factor *= vol_scale
 
@@ -424,41 +447,58 @@ def get_trade_size(current_price):
 
 
 def check_cooldown(level_idx):
-    """Prevent whipsaw: enforce minimum time between trades on the same grid level."""
     last_time = state["grid_state"]["last_trade_time"].get(str(level_idx), 0)
     return (time.time() - last_time) >= state["settings"]["cooldown_seconds"]
 
 
 def check_trend_filter(action):
-    """Use EMA crossover + MACD to filter trades with the trend."""
+    """
+    Multi-timeframe trend filter:
+    - Primary: 1m EMA crossover + Stoch RSI
+    - Confirmation: 5m trend agreement (when mtf_trend_filter enabled)
+    - Volume: require above-average volume (when volume_filter enabled)
+    """
     if not state["settings"]["trend_filter"]:
         return True
 
     ind = state["indicators"]["BTC/USD"]
-    trend = ind.get("trend", "NEUTRAL")
-    macd_hist = ind.get("macd_histogram", 0)
+    trend_1m = ind.get("trend", "NEUTRAL")
+    trend_5m = ind.get("trend_5m", "NEUTRAL")
     stoch_rsi = ind.get("stoch_rsi", 50)
+    mtf_agreement = ind.get("mtf_agreement", False)
+    volume_ratio = ind.get("volume_ratio", 1.0)
+
+    # Volume filter: skip trades on suspiciously low volume (below 60% of average)
+    if state["settings"].get("volume_filter", True) and volume_ratio < 0.6:
+        return False
 
     if action == "BUY":
-        # Allow buys when: trend is not strongly bearish, OR stoch RSI is oversold
-        if trend == "BEARISH" and stoch_rsi > 25:
-            return False  # Don't catch falling knives
+        # Hard block: 1m bearish AND 5m bearish AND stoch not oversold = falling knife
+        if trend_1m == "BEARISH" and trend_5m == "BEARISH" and stoch_rsi > 25:
+            return False
+        # Soft block: 1m bearish but 5m neutral/bullish = allow with stoch check
+        if trend_1m == "BEARISH" and stoch_rsi > 35:
+            return False
+        # MTF boost: if both timeframes agree bullish, always allow
+        if state["settings"].get("mtf_trend_filter", True) and mtf_agreement and trend_1m == "BULLISH":
+            return True
         return True
 
     elif action == "SELL":
-        # Allow sells when: trend is not strongly bullish, OR stoch RSI is overbought
-        if trend == "BULLISH" and stoch_rsi < 75:
-            return False  # Don't sell into a pump
+        # Hard block: 1m bullish AND 5m bullish AND not overbought = don't sell into pump
+        if trend_1m == "BULLISH" and trend_5m == "BULLISH" and stoch_rsi < 75:
+            return False
+        # Soft block: 1m bullish but 5m neutral/bearish = allow with stoch check
+        if trend_1m == "BULLISH" and stoch_rsi < 65:
+            return False
         return True
 
     return True
 
 
 def check_circuit_breaker():
-    """Stop trading if drawdown exceeds limit."""
     cb = state["circuit_breaker"]
 
-    # If already active, check if cooldown expired (5 min recovery window)
     if cb["active"]:
         if time.time() > cb["cooldown_until"]:
             cb["active"] = False
@@ -467,7 +507,6 @@ def check_circuit_breaker():
             return False
         return True
 
-    # Check drawdown
     total_value = state["portfolio"]["total_value"]
     initial = state["portfolio"]["initial_balance"]
     peak = state["stats"]["peak_value"]
@@ -475,22 +514,15 @@ def check_circuit_breaker():
     if initial <= 0:
         return False
 
-    # Drawdown from peak
-    if peak > 0:
-        drawdown_from_peak = ((peak - total_value) / peak) * 100
-    else:
-        drawdown_from_peak = 0
-
-    # Drawdown from initial
+    drawdown_from_peak = ((peak - total_value) / peak) * 100 if peak > 0 else 0
     drawdown_from_initial = ((initial - total_value) / initial) * 100
-
     max_dd = max(drawdown_from_peak, drawdown_from_initial)
     state["stats"]["max_drawdown"] = round(max_dd, 2)
 
     if max_dd >= state["settings"]["drawdown_limit_pct"]:
         cb["active"] = True
         cb["triggered_at"] = time.time()
-        cb["cooldown_until"] = time.time() + 300  # 5 min pause
+        cb["cooldown_until"] = time.time() + 300
         cb["reason"] = f"Drawdown {max_dd:.1f}% exceeded {state['settings']['drawdown_limit_pct']}% limit"
         logger.warning(f"🔴 CIRCUIT BREAKER: {cb['reason']}")
         return True
@@ -499,7 +531,6 @@ def check_circuit_breaker():
 
 
 def update_stats(action, pnl, trade_usd):
-    """Track win/loss statistics for performance monitoring."""
     stats = state["stats"]
     stats["total_trades"] += 1
     stats["total_volume"] = round(stats["total_volume"] + trade_usd, 2)
@@ -515,13 +546,11 @@ def update_stats(action, pnl, trade_usd):
     total = stats["winning_trades"] + stats["losing_trades"]
     stats["win_rate"] = round((stats["winning_trades"] / total * 100) if total > 0 else 0, 1)
 
-    # Update peak value
     if state["portfolio"]["total_value"] > stats["peak_value"]:
         stats["peak_value"] = round(state["portfolio"]["total_value"], 2)
 
 
 async def execute_trade(symbol, action, current_price, trade_usd_amount, level_idx=None):
-    """Execute a trade with proper fee calculation and stats tracking."""
     slippage = current_price * state["settings"]["slippage_rate"]
     exec_price = current_price + slippage if action == "BUY" else current_price - slippage
 
@@ -530,8 +559,6 @@ async def execute_trade(symbol, action, current_price, trade_usd_amount, level_i
     if action == "BUY":
         if state["portfolio"]["cash"] < trade_usd_amount:
             return False
-
-        # Check max open positions
         if len(state["grid_state"]["filled_levels"]) >= state["settings"]["max_open_positions"]:
             return False
 
@@ -542,7 +569,6 @@ async def execute_trade(symbol, action, current_price, trade_usd_amount, level_i
         state["portfolio"]["total_fees"] = round(state["portfolio"]["total_fees"] + fee, 4)
         state["portfolio"]["holdings"][symbol] = round(state["portfolio"]["holdings"][symbol] + qty, 8)
 
-        # Weighted average cost basis
         old_qty = state["portfolio"]["holdings"][symbol] - qty
         old_cost = old_qty * state["portfolio"]["cost_basis"].get(symbol, 0)
         new_cost = qty * exec_price
@@ -550,7 +576,6 @@ async def execute_trade(symbol, action, current_price, trade_usd_amount, level_i
         if total_qty > 0:
             state["portfolio"]["cost_basis"][symbol] = round((old_cost + new_cost) / total_qty, 2)
 
-        # Track this fill at the grid level
         if level_idx is not None:
             state["grid_state"]["filled_levels"][str(level_idx)] = {
                 "qty": qty,
@@ -565,7 +590,6 @@ async def execute_trade(symbol, action, current_price, trade_usd_amount, level_i
         return True
 
     elif action == "SELL":
-        # Try to sell from a specific grid level fill
         fill = None
         fill_key = None
         if level_idx is not None:
@@ -576,7 +600,6 @@ async def execute_trade(symbol, action, current_price, trade_usd_amount, level_i
             qty_to_sell = fill["qty"]
             entry_cost = fill["cost"]
         else:
-            # Fallback: sell equivalent USD worth
             qty_to_sell = round(float(trade_usd_amount / exec_price), 8)
             entry_cost = trade_usd_amount
 
@@ -586,7 +609,6 @@ async def execute_trade(symbol, action, current_price, trade_usd_amount, level_i
         sale_value = round(float(qty_to_sell * exec_price), 2)
         fee = calculate_fees(sale_value)
         net_sale = sale_value - fee
-
         pnl = round(net_sale - entry_cost, 2)
 
         state["portfolio"]["cash"] = round(state["portfolio"]["cash"] + net_sale, 2)
@@ -598,7 +620,6 @@ async def execute_trade(symbol, action, current_price, trade_usd_amount, level_i
             state["portfolio"]["holdings"][symbol] = 0.0
             state["portfolio"]["cost_basis"][symbol] = 0.0
 
-        # Remove filled level
         if fill_key and fill_key in state["grid_state"]["filled_levels"]:
             del state["grid_state"]["filled_levels"][fill_key]
 
@@ -614,29 +635,17 @@ async def execute_trade(symbol, action, current_price, trade_usd_amount, level_i
 
 
 async def evaluate_grid(symbol, price):
-    """
-    The core grid strategy with all enhancements:
-    - Trend filtering
-    - Cooldown protection
-    - Volatility-scaled sizing
-    - Dynamic grid rebalancing
-    - Circuit breaker
-    """
-    # Circuit breaker check
     if check_circuit_breaker():
         return
 
     gs = state["grid_state"]
 
-    # Initialize or rebalance grid
     if not gs["initialized"]:
         initialize_grid(price)
         await log_event(f"🕸️ Grid initialized: ${gs['range_low']:.0f} - ${gs['range_high']:.0f} ({len(gs['levels'])} levels)")
         return
 
     if should_rebalance_grid(price):
-        # Preserve filled levels relative positions before rebalancing
-        old_levels = gs["levels"]
         initialize_grid(price)
         await log_event(f"🔄 Grid rebalanced around ${price:.0f}: ${gs['range_low']:.0f} - ${gs['range_high']:.0f}")
         return
@@ -649,24 +658,20 @@ async def evaluate_grid(symbol, price):
         return
 
     trade_size = get_trade_size(price)
-
-    # Check multiple levels (in case price jumped past several in one tick)
     trades_this_tick = 0
-    max_trades_per_tick = 3  # Cap to prevent burst trading
+    max_trades_per_tick = 3
 
-    # --- Price moved UP: check for SELL signals ---
+    # --- Price moved UP: SELL signals ---
     while curr_idx < len(levels) - 1 and trades_this_tick < max_trades_per_tick:
         level_above = levels[curr_idx + 1]
         if price < level_above:
             break
 
         next_idx = curr_idx + 1
-
-        # Check if we have a fill at or below this level to sell
         sell_level = None
         for filled_idx_str in list(state["grid_state"]["filled_levels"].keys()):
             filled_idx = int(filled_idx_str)
-            if filled_idx <= curr_idx:  # Sell fills from lower levels
+            if filled_idx <= curr_idx:
                 sell_level = filled_idx
                 break
 
@@ -679,16 +684,14 @@ async def evaluate_grid(symbol, price):
         state["grid_state"]["current_index"] = next_idx
         curr_idx = next_idx
 
-    # --- Price moved DOWN: check for BUY signals ---
-    curr_idx = state["grid_state"]["current_index"]  # Refresh after potential changes
+    # --- Price moved DOWN: BUY signals ---
+    curr_idx = state["grid_state"]["current_index"]
     while curr_idx > 0 and trades_this_tick < max_trades_per_tick:
         level_below = levels[curr_idx - 1]
         if price > level_below:
             break
 
         next_idx = curr_idx - 1
-
-        # Only buy if we don't already have a fill at this level
         if str(next_idx) not in state["grid_state"]["filled_levels"]:
             if check_cooldown(next_idx) and check_trend_filter("BUY"):
                 if state["portfolio"]["cash"] >= trade_size:
@@ -699,17 +702,26 @@ async def evaluate_grid(symbol, price):
         state["grid_state"]["current_index"] = next_idx
         curr_idx = next_idx
 
-async def process_price_update(symbol, price):
+
+async def process_price_update(symbol, price, volume=0.0):
     price = float(price)
+    volume = float(volume)
     state["prices"][symbol] = price
 
     now = time.time()
 
+    # Accumulate volume within candle period
+    state["current_volume_tick"] = state.get("current_volume_tick", 0.0) + volume
+    state["current_volume_5m_tick"] = state.get("current_volume_5m_tick", 0.0) + volume
+
     # Update 1-min candle history
     if now - state.get("last_history_update", 0) >= 60:
         state["history"][symbol].append(price)
+        state["volume_history"][symbol].append(state["current_volume_tick"])
+        state["current_volume_tick"] = 0.0
         if len(state["history"][symbol]) > 200:
             state["history"][symbol].pop(0)
+            state["volume_history"][symbol].pop(0)
         state["last_history_update"] = now
     else:
         if len(state["history"][symbol]) > 0:
@@ -718,15 +730,21 @@ async def process_price_update(symbol, price):
     # Update 5-min candle history
     if now - state.get("last_5m_update", 0) >= 300:
         state["history_5m"][symbol].append(price)
+        state["volume_5m"][symbol].append(state["current_volume_5m_tick"])
+        state["current_volume_5m_tick"] = 0.0
         if len(state["history_5m"][symbol]) > 100:
             state["history_5m"][symbol].pop(0)
+            state["volume_5m"][symbol].pop(0)
         state["last_5m_update"] = now
     else:
         if len(state["history_5m"][symbol]) > 0:
             state["history_5m"][symbol][-1] = price
 
-    # Recalculate indicators
-    state["indicators"][symbol] = calculate_all_indicators(state["history"][symbol])
+    # Recalculate indicators with volume
+    state["indicators"][symbol] = calculate_all_indicators(
+        state["history"][symbol],
+        volumes=state["volume_history"][symbol]
+    )
 
     # Portfolio value tracking
     h_val = round(float(state["portfolio"]["holdings"][symbol] * price), 2)
@@ -741,33 +759,56 @@ async def process_price_update(symbol, price):
     else:
         state["portfolio"]["unrealized_pnl"] = 0.0
 
-    # Track peak value for drawdown calc
     if state["portfolio"]["total_value"] > state["stats"].get("peak_value", 0):
         state["stats"]["peak_value"] = round(state["portfolio"]["total_value"], 2)
 
-    # Run the grid engine
     await evaluate_grid(symbol, price)
     await manager.broadcast_state()
 
-# --- DATA WARMUP & STREAM ---
+
+# --- DATA WARMUP ---
 async def warmup_indicators(internal_symbol="BTC/USD"):
-    await log_event(f"🔥 WARMING UP INDICATORS FOR {internal_symbol} (Coinbase)...")
-    url = "https://api.exchange.coinbase.com/products/BTC-USD/candles?granularity=60"
-    
+    await log_event(f"🔥 WARMING UP INDICATORS (1m + 5m candles)...")
+    headers = HEADERS
+
     async with aiohttp.ClientSession() as session:
+        # 1-min candles
         try:
-            async with session.get(url, headers=HEADERS) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    closes = [float(candle[4]) for candle in data]
-                    closes.reverse()
-                    state["history"][internal_symbol] = closes[-100:]
+            url_1m = "https://api.exchange.coinbase.com/products/BTC-USD/candles?granularity=60"
+            async with session.get(url_1m, headers=headers) as r:
+                if r.status == 200:
+                    data = await r.json()
+                    # candle: [time, low, high, open, close, volume]
+                    data.reverse()
+                    closes = [float(c[4]) for c in data[-100:]]
+                    volumes = [float(c[5]) for c in data[-100:]]
+                    state["history"][internal_symbol] = closes
+                    state["volume_history"][internal_symbol] = volumes
                     state["last_history_update"] = time.time()
-                    state["indicators"][internal_symbol] = calculate_all_indicators(state["history"][internal_symbol])
-                else:
-                    logger.warning(f"Warmup failed: HTTP {response.status}")
         except Exception as e:
-            logger.error(f"Warmup connection error: {e}")
+            logger.error(f"1m warmup error: {e}")
+
+        # 5-min candles
+        try:
+            url_5m = "https://api.exchange.coinbase.com/products/BTC-USD/candles?granularity=300"
+            async with session.get(url_5m, headers=headers) as r:
+                if r.status == 200:
+                    data = await r.json()
+                    data.reverse()
+                    closes_5m = [float(c[4]) for c in data[-60:]]
+                    volumes_5m = [float(c[5]) for c in data[-60:]]
+                    state["history_5m"][internal_symbol] = closes_5m
+                    state["volume_5m"][internal_symbol] = volumes_5m
+                    state["last_5m_update"] = time.time()
+        except Exception as e:
+            logger.error(f"5m warmup error: {e}")
+
+    state["indicators"][internal_symbol] = calculate_all_indicators(
+        state["history"][internal_symbol],
+        volumes=state["volume_history"][internal_symbol]
+    )
+    await log_event(f"✅ Warmup complete. 1m trend: {state['indicators'][internal_symbol]['trend']} | 5m trend: {state['indicators'][internal_symbol]['trend_5m']}")
+
 
 async def fetch_macro_context(internal_symbol="BTC/USD"):
     url = "https://api.exchange.coinbase.com/products/BTC-USD/candles?granularity=86400"
@@ -778,41 +819,88 @@ async def fetch_macro_context(internal_symbol="BTC/USD"):
                     data = await response.json()
                     closes = [float(candle[4]) for candle in data]
                     if closes:
-                        closes.reverse() 
-                        closes_90 = closes[-90:] 
+                        closes.reverse()
+                        closes_90 = closes[-90:]
                         state["macro"][internal_symbol] = {
                             "high_90d": max(closes_90),
                             "low_90d": min(closes_90),
                             "trend_pct": ((closes_90[-1] - closes_90[0]) / closes_90[0]) * 100
                         }
-        except: pass
+        except:
+            pass
 
+
+# --- COINBASE WEBSOCKET STREAM ---
 async def stream_live_crypto():
-    load_state() 
+    """
+    Connects to Coinbase Advanced Trade WebSocket for real-time tick data.
+    Falls back to REST polling if WebSocket fails.
+    """
+    load_state()
     await asyncio.sleep(1)
     await asyncio.gather(fetch_macro_context(), warmup_indicators())
-    
-    await log_event("📡 STARTING LIVE COINBASE DATA STREAM (GRID ACTIVE)...")
-    url = "https://api.exchange.coinbase.com/products/BTC-USD/ticker"
-    
+    await log_event("📡 CONNECTING TO COINBASE WEBSOCKET STREAM...")
+
+    ws_url = "wss://advanced-trade-ws.coinbase.com"
+    subscribe_msg = json.dumps({
+        "type": "subscribe",
+        "product_ids": ["BTC-USD"],
+        "channel": "ticker"
+    })
+
     backoff = 2
-    async with aiohttp.ClientSession() as session:
-        while True:
+    while True:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.ws_connect(ws_url, heartbeat=30) as ws:
+                    await ws.send_str(subscribe_msg)
+                    await log_event("✅ WebSocket connected to Coinbase. Live tick data active.")
+                    backoff = 2  # reset on successful connect
+
+                    async for msg in ws:
+                        if msg.type == aiohttp.WSMsgType.TEXT:
+                            try:
+                                data = json.loads(msg.data)
+                                # Coinbase Advanced Trade ticker format
+                                events = data.get("events", [])
+                                for event in events:
+                                    tickers = event.get("tickers", [])
+                                    for ticker in tickers:
+                                        if ticker.get("product_id") == "BTC-USD":
+                                            price = float(ticker.get("price", 0))
+                                            volume = float(ticker.get("volume_24_h", 0))
+                                            if price > 0:
+                                                await process_price_update("BTC/USD", price, volume / 86400)
+                            except Exception as e:
+                                logger.error(f"WS message parse error: {e}")
+                        elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSED):
+                            break
+
+        except Exception as e:
+            logger.error(f"WebSocket error: {e}. Reconnecting in {backoff}s...")
+            await log_event(f"⚠️ WS disconnected. Falling back to REST for {backoff}s...")
+
+            # Fallback REST polling during reconnect window
             try:
-                async with session.get(url, headers=HEADERS) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        await process_price_update("BTC/USD", float(data['price']))
-                        backoff = 2 
-                    elif response.status == 429:
-                        await log_event(f"⚠️ Exchange Rate Limit Hit. Backing off for {backoff}s...")
-                        await asyncio.sleep(backoff)
-                        backoff = min(backoff * 2, 60)
-            except Exception as e:
-                logger.error(f"Stream error: {e}")
-                await asyncio.sleep(backoff)
-                
-            await asyncio.sleep(2)
+                async with aiohttp.ClientSession() as session:
+                    for _ in range(backoff):
+                        try:
+                            async with session.get(
+                                "https://api.exchange.coinbase.com/products/BTC-USD/ticker",
+                                headers=HEADERS
+                            ) as r:
+                                if r.status == 200:
+                                    d = await r.json()
+                                    await process_price_update("BTC/USD", float(d["price"]))
+                        except Exception:
+                            pass
+                        await asyncio.sleep(2)
+            except Exception:
+                pass
+
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 60)
+
 
 # --- API SETUP ---
 @asynccontextmanager
@@ -820,7 +908,7 @@ async def lifespan(app: FastAPI):
     t = asyncio.create_task(stream_live_crypto())
     yield
     t.cancel()
-    save_state() 
+    save_state()
 
 app = FastAPI(lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -829,7 +917,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 async def websocket_endpoint(ws: WebSocket):
     await manager.connect(ws)
     try:
-        while True: 
+        while True:
             data = await ws.receive_text()
             try:
                 payload = json.loads(data)
@@ -839,11 +927,10 @@ async def websocket_endpoint(ws: WebSocket):
                         cash_diff = new_cash - state["portfolio"]["cash"]
                         state["portfolio"]["cash"] = round(new_cash, 2)
                         state["portfolio"]["initial_balance"] = round(state["portfolio"]["initial_balance"] + cash_diff, 2)
-                    
+
                     if "trade_size_usd" in payload:
                         state["settings"]["trade_size_usd"] = float(payload["trade_size_usd"])
-                    
-                    # If upper/lower grid bounds change, force a grid re-initialization
+
                     reinit = False
                     if "grid_upper" in payload:
                         state["settings"]["grid_upper"] = float(payload["grid_upper"])
@@ -854,10 +941,15 @@ async def websocket_endpoint(ws: WebSocket):
                     if "grid_levels" in payload:
                         state["settings"]["grid_levels"] = int(payload["grid_levels"])
                         reinit = True
-                        
+
+                    # Boolean toggles
+                    for flag in ("volume_filter", "mtf_trend_filter", "trend_filter", "volatility_scaling", "auto_range"):
+                        if flag in payload:
+                            state["settings"][flag] = bool(payload[flag])
+
                     if reinit:
                         state["grid_state"]["initialized"] = False
-                    
+
                     save_state()
                     await log_event(f"⚙️ Settings Updated (Grid: {state['settings']['grid_lower']}-{state['settings']['grid_upper']} | Size: ${state['settings']['trade_size_usd']})")
                     await manager.broadcast_state()
