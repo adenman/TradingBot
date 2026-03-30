@@ -406,6 +406,33 @@ export default function App() {
               <Toggle key={key} label={label} value={toggles[key] ?? settings?.[key] ?? true} onChange={v => setToggles(t => ({ ...t, [key]: v }))} />
             ))}
           </div>
+
+          {/* Live Trading Toggle — separate section with warning */}
+          <div style={{ borderTop: `1px solid ${C.border}`, paddingTop: '14px', marginBottom: '16px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '10px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                <Toggle
+                  label=""
+                  value={toggles['live_trading'] ?? settings?.live_trading ?? false}
+                  onChange={v => {
+                    if (v && !window.confirm('⚠️ ENABLE LIVE TRADING?\n\nThis will place REAL orders with REAL money on Coinbase.\n\nMake sure you understand the risks. Continue?')) return;
+                    setToggles(t => ({ ...t, live_trading: v }));
+                  }}
+                />
+                <span style={{ fontWeight: 700, color: (toggles['live_trading'] ?? settings?.live_trading) ? C.red : C.muted, fontSize: '0.9rem' }}>
+                  {(toggles['live_trading'] ?? settings?.live_trading) ? '🔴 LIVE TRADING — REAL MONEY' : '⚪ Paper Trading'}
+                </span>
+              </div>
+              {(toggles['live_trading'] ?? settings?.live_trading) && (
+                <Badge color={C.red}>Daily Loss Limit: ${settings?.daily_loss_limit_usd ?? 20}</Badge>
+              )}
+            </div>
+            {(toggles['live_trading'] ?? settings?.live_trading) && (
+              <div style={{ marginTop: '8px', fontSize: '0.78rem', color: C.orange, backgroundColor: '#7f1d1d22', border: `1px solid ${C.red}33`, borderRadius: '6px', padding: '8px 12px' }}>
+                ⚠️ Live mode active — bot is placing real orders on Coinbase. Monitor closely.
+              </div>
+            )}
+          </div>
           <button type="submit" style={{ padding: '10px 24px', backgroundColor: C.blue, color: '#fff', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 700, fontSize: '0.9rem' }}>
             Save Settings
           </button>

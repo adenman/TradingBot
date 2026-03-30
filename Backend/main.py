@@ -4,8 +4,11 @@ import asyncio
 import logging
 import time
 import math
+import hmac
+import hashlib
+import base64
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timezone
 import aiohttp
 import numpy as np
 import pandas as pd
@@ -22,7 +25,127 @@ logger = logging.getLogger("GridBot")
 HEADERS = {"User-Agent": "AlgoBot/1.0"}
 STATE_FILE = "portfolio.json"
 
-# --- STATE MANAGEMENT ---
+# Coinbase Advanced Trade API credentials
+CB_API_KEY_NAME = os.getenv("COINBASE_API_KEY_NAME", "")
+CB_PRIVATE_KEY  = os.getenv("COINBASE_PRIVATE_KEY", "").replace("\\n", "\n")
+CB_REST_URL     = "https://api.coinbase.com"
+
+# ── Coinbase Advanced Trade API Auth ─────────────────────────────────────────
+
+def _cb_jwt_token(method: str, path: str) -> str:
+    """Generate a short-lived JWT for Coinbase Advanced Trade API."""
+    import jwt as pyjwt  # pip install PyJWT cryptography
+    from cryptography.hazmat.primitives.serialization import load_pem_private_key
+
+    private_key = load_pem_private_key(CB_PRIVATE_KEY.encode(), password=None)
+    now = int(time.time())
+    payload = {
+        "sub": CB_API_KEY_NAME,
+        "iss": "coinbase-cloud",
+        "nbf": now,
+        "exp": now + 120,
+        "uri": f"{method} api.coinbase.com{path}",
+    }
+    token = pyjwt.encode(payload, private_key, algorithm="ES256",
+                         headers={"kid": CB_API_KEY_NAME, "nonce": str(now)})
+    return token
+
+
+async def cb_get_account() -> dict:
+    """Fetch real BTC/USD balances from Coinbase."""
+    path = "/api/v3/brokerage/accounts"
+    token = _cb_jwt_token("GET", path)
+    async with aiohttp.ClientSession() as session:
+        async with session.get(
+            CB_REST_URL + path,
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        ) as r:
+            data = await r.json()
+            accounts = data.get("accounts", [])
+            result = {"BTC": 0.0, "USD": 0.0}
+            for a in accounts:
+                currency = a.get("currency", "")
+                balance = float(a.get("available_balance", {}).get("value", 0))
+                if currency == "BTC":
+                    result["BTC"] = balance
+                elif currency == "USD":
+                    result["USD"] = balance
+            return result
+
+
+async def cb_place_order(action: str, base_size: float = None, quote_size: float = None) -> dict:
+    """
+    Place a market order on Coinbase.
+    action: 'BUY' | 'SELL'
+    quote_size: USD amount for BUY (market buy by spend)
+    base_size: BTC amount for SELL (market sell by quantity)
+    Returns order dict or raises.
+    """
+    import uuid
+    path = "/api/v3/brokerage/orders"
+    token = _cb_jwt_token("POST", path)
+
+    order_config = {}
+    if action == "BUY" and quote_size:
+        order_config = {"market_market_ioc": {"quote_size": f"{quote_size:.2f}"}}
+    elif action == "SELL" and base_size:
+        order_config = {"market_market_ioc": {"base_size": f"{base_size:.8f}"}}
+    else:
+        raise ValueError(f"Invalid order params: {action} base={base_size} quote={quote_size}")
+
+    body = {
+        "client_order_id": str(uuid.uuid4()),
+        "product_id": "BTC-USD",
+        "side": action,
+        "order_configuration": order_config,
+    }
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            CB_REST_URL + path,
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json=body,
+        ) as r:
+            data = await r.json()
+            if not data.get("success"):
+                raise Exception(f"Order failed: {data}")
+            return data.get("order", data.get("success_response", {}))
+
+
+async def cb_get_order(order_id: str) -> dict:
+    """Fetch order status from Coinbase."""
+    path = f"/api/v3/brokerage/orders/historical/{order_id}"
+    token = _cb_jwt_token("GET", path)
+    async with aiohttp.ClientSession() as session:
+        async with session.get(
+            CB_REST_URL + path,
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        ) as r:
+            data = await r.json()
+            return data.get("order", {})
+
+
+def check_daily_loss_limit() -> bool:
+    """Returns True if daily loss limit is hit (block trading)."""
+    if not state["settings"].get("live_trading"):
+        return False
+    tracker = state["daily_loss_tracker"]
+    today = datetime.now().strftime("%Y-%m-%d")
+    if tracker["date"] != today:
+        tracker["date"] = today
+        tracker["start_value"] = state["portfolio"]["total_value"]
+        tracker["loss_today"] = 0.0
+    tracker["loss_today"] = tracker["start_value"] - state["portfolio"]["total_value"]
+    limit = state["settings"].get("daily_loss_limit_usd", 20.0)
+    if tracker["loss_today"] >= limit:
+        logger.warning(f"🛑 Daily loss limit hit: ${tracker['loss_today']:.2f} >= ${limit}")
+        return True
+    return False
+
+
+# ── End Coinbase API ──────────────────────────────────────────────────────────
+
+
 state = {
     "settings": {
         "strategy": "ADAPTIVE_GRID",     # ADAPTIVE_GRID | STANDARD_GRID
@@ -46,6 +169,9 @@ state = {
         "slippage_rate": 0.0005,         # Simulated slippage (0.05%)
         "volume_filter": True,           # Require above-average volume for trades
         "mtf_trend_filter": True,        # Use 5m candles for multi-timeframe confirmation
+        "live_trading": False,           # LIVE MODE — places real orders on Coinbase
+        "live_order_type": "market",     # market | limit
+        "daily_loss_limit_usd": 20.0,   # Hard stop: max USD loss per day in live mode
     },
     "grid_state": {
         "initialized": False,
@@ -126,6 +252,12 @@ state = {
     "price_chart": [],                   # 1m candle closes for charting [{time, price}] — up to 10080 (1 week)
     "equity_history": [],                # Portfolio value over time [{time, value, pnl}]
     "trade_markers": [],                 # Recent trades for chart overlay [{time, action, price}]
+    "live_orders": {},                   # {level_idx: coinbase_order_id} for live mode tracking
+    "daily_loss_tracker": {
+        "date": "",
+        "start_value": 0.0,
+        "loss_today": 0.0,
+    },
 }
 
 # --- PERSISTENCE ---
@@ -568,6 +700,81 @@ def update_stats(action, pnl, trade_usd):
 
 
 async def execute_trade(symbol, action, current_price, trade_usd_amount, level_idx=None):
+    # ── Live Trading Mode ─────────────────────────────────────────────────────
+    if state["settings"].get("live_trading"):
+        if check_daily_loss_limit():
+            await log_event("🛑 Daily loss limit reached — trade blocked.")
+            return False
+        try:
+            if action == "BUY":
+                order = await cb_place_order("BUY", quote_size=trade_usd_amount)
+                order_id = order.get("order_id", "unknown")
+                # Get actual fill from Coinbase account
+                await asyncio.sleep(1.5)  # let order settle
+                accounts = await cb_get_account()
+                btc_bal = accounts["BTC"]
+                usd_bal = accounts["USD"]
+                exec_price = current_price  # approximate; real fill in order details
+                qty = round(trade_usd_amount / exec_price, 8)
+                fee = calculate_fees(trade_usd_amount)
+
+                state["portfolio"]["cash"] = round(usd_bal, 2)
+                state["portfolio"]["holdings"][symbol] = round(btc_bal, 8)
+                state["portfolio"]["total_fees"] = round(state["portfolio"]["total_fees"] + fee, 4)
+                if level_idx is not None:
+                    state["grid_state"]["filled_levels"][str(level_idx)] = {
+                        "qty": qty, "entry_price": exec_price,
+                        "cost": trade_usd_amount, "time": time.time(),
+                    }
+                    state["grid_state"]["last_trade_time"][str(level_idx)] = time.time()
+                    state["live_orders"][str(level_idx)] = order_id
+
+                update_stats("BUY", 0, trade_usd_amount)
+                await log_event(f"🟢 LIVE BUY ${trade_usd_amount:.2f} @ ~${exec_price:.2f} | Order: {order_id[:8]}… [Grid #{level_idx}]")
+                state["trade_markers"].append({"time": datetime.now().strftime("%m/%d %H:%M"), "action": "BUY", "price": round(exec_price, 2)})
+                if len(state["trade_markers"]) > 500: state["trade_markers"].pop(0)
+                return True
+
+            elif action == "SELL":
+                fill_key = str(level_idx) if level_idx is not None else None
+                fill = state["grid_state"]["filled_levels"].get(fill_key) if fill_key else None
+                qty_to_sell = fill["qty"] if fill else round(trade_usd_amount / current_price, 8)
+                entry_cost = fill["cost"] if fill else trade_usd_amount
+
+                order = await cb_place_order("SELL", base_size=qty_to_sell)
+                order_id = order.get("order_id", "unknown")
+                await asyncio.sleep(1.5)
+                accounts = await cb_get_account()
+                usd_bal = accounts["USD"]
+                btc_bal = accounts["BTC"]
+                exec_price = current_price
+                sale_value = round(qty_to_sell * exec_price, 2)
+                fee = calculate_fees(sale_value)
+                pnl = round(sale_value - fee - entry_cost, 2)
+
+                state["portfolio"]["cash"] = round(usd_bal, 2)
+                state["portfolio"]["holdings"][symbol] = round(btc_bal, 8)
+                state["portfolio"]["total_fees"] = round(state["portfolio"]["total_fees"] + fee, 4)
+                state["portfolio"]["realized_pnl"] = round(state["portfolio"]["realized_pnl"] + pnl, 2)
+                if fill_key and fill_key in state["grid_state"]["filled_levels"]:
+                    del state["grid_state"]["filled_levels"][fill_key]
+                if fill_key and fill_key in state["live_orders"]:
+                    del state["live_orders"][fill_key]
+                if level_idx is not None:
+                    state["grid_state"]["last_trade_time"][str(level_idx)] = time.time()
+
+                update_stats("SELL", pnl, sale_value)
+                pnl_emoji = "✅" if pnl >= 0 else "❌"
+                await log_event(f"🔴 LIVE SELL ${sale_value:.2f} @ ~${exec_price:.2f} P&L: {pnl_emoji}${pnl:.2f} | Order: {order_id[:8]}… [Grid #{level_idx}]")
+                state["trade_markers"].append({"time": datetime.now().strftime("%m/%d %H:%M"), "action": "SELL", "price": round(exec_price, 2)})
+                if len(state["trade_markers"]) > 500: state["trade_markers"].pop(0)
+                return True
+
+        except Exception as e:
+            await log_event(f"❌ LIVE ORDER FAILED: {e}")
+            return False
+
+    # ── Paper Trading Mode ────────────────────────────────────────────────────
     slippage = current_price * state["settings"]["slippage_rate"]
     exec_price = current_price + slippage if action == "BUY" else current_price - slippage
 
@@ -1042,7 +1249,7 @@ async def websocket_endpoint(ws: WebSocket):
                         reinit = True
 
                     # Boolean toggles
-                    for flag in ("volume_filter", "mtf_trend_filter", "trend_filter", "volatility_scaling", "auto_range"):
+                    for flag in ("volume_filter", "mtf_trend_filter", "trend_filter", "volatility_scaling", "auto_range", "live_trading"):
                         if flag in payload:
                             state["settings"][flag] = bool(payload[flag])
 
