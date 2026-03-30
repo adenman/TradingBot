@@ -1,0 +1,43 @@
+name: Deploy TradingBot Frontend
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Frontend/**'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: Frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: Frontend
+
+      - name: Build
+        run: npm run build
+        working-directory: Frontend
+
+      - name: Deploy to Bluehost via FTP
+        run: |
+          cd Frontend/dist
+          find . -type f | while read file; do
+            clean="${file#./}"
+            curl --ftp-ssl --insecure --silent --show-error \
+              -u "${{ secrets.FTP_USER }}:${{ secrets.FTP_PASSWORD }}" \
+              --ftp-create-dirs \
+              -T "$file" \
+              "ftp://${{ secrets.FTP_HOST }}/TradingBot/$clean"
+            echo "✓ $clean"
+          done
