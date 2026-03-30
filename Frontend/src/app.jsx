@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   AreaChart, Area, LineChart, Line, BarChart, Bar,
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
-  ReferenceLine, Dot, Brush,
+  ReferenceLine, Dot,
 } from 'recharts';
 
 // ── Palette ──────────────────────────────────────────────────────────────────
@@ -156,6 +156,8 @@ export default function App() {
   const [bot, setBot] = useState(null);
   const [conn, setConn] = useState('Connecting...');
   const [chartTab, setChartTab] = useState('price');
+  const [priceWindow, setPriceWindow] = useState(60);
+  const [eqWindow, setEqWindow] = useState(60);
   const [form, setForm] = useState({});
   const [toggles, setToggles] = useState({});
   const wsRef = useRef(null);
@@ -232,6 +234,8 @@ export default function App() {
     buy: mkrMap[p.time]?.buy ?? null,
     sell: mkrMap[p.time]?.sell ?? null,
   }));
+  const slicedPriceData = priceData.slice(-priceWindow);
+  const slicedEqData = (equity_history || []).slice(-eqWindow);
 
   const connColor = conn === 'Connected' ? C.green : conn === 'Disconnected' ? C.red : C.yellow;
   const trendColor = ind.trend === 'BULLISH' ? C.green : ind.trend === 'BEARISH' ? C.red : C.muted;
@@ -342,7 +346,24 @@ export default function App() {
       <div style={{ ...card, marginBottom: '12px' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
           <div style={cardTitle}>Chart</div>
-          <div style={{ display: 'flex', gap: '6px' }}>
+          <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', alignItems: 'center' }}>
+            {/* Window preset buttons */}
+            {chartTab === 'price' && [15, 30, 60, 120].map(w => (
+              <button key={w} onClick={() => setPriceWindow(w)} style={{
+                padding: '3px 10px', borderRadius: '5px', fontSize: '0.72rem', fontWeight: 600, cursor: 'pointer', border: 'none',
+                backgroundColor: priceWindow === w ? C.blue : C.subtle,
+                color: priceWindow === w ? '#fff' : C.muted,
+              }}>{w === 120 ? 'All' : `${w}m`}</button>
+            ))}
+            {chartTab === 'equity' && [15, 30, 60, 120].map(w => (
+              <button key={w} onClick={() => setEqWindow(w)} style={{
+                padding: '3px 10px', borderRadius: '5px', fontSize: '0.72rem', fontWeight: 600, cursor: 'pointer', border: 'none',
+                backgroundColor: eqWindow === w ? C.green : C.subtle,
+                color: eqWindow === w ? '#fff' : C.muted,
+              }}>{w === 120 ? 'All' : `${w}m`}</button>
+            ))}
+            <div style={{ width: '1px', height: '18px', backgroundColor: C.border, margin: '0 4px' }} />
+            {/* Chart type tabs */}
             {['price', 'equity'].map(t => (
               <button key={t} onClick={() => setChartTab(t)} style={{
                 padding: '4px 14px', borderRadius: '6px', fontSize: '0.78rem', fontWeight: 600, cursor: 'pointer', border: 'none',
@@ -357,7 +378,7 @@ export default function App() {
         {chartTab === 'price' && (
           priceData.length > 1 ? (
             <ResponsiveContainer width="100%" height={280}>
-              <AreaChart data={priceData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+              <AreaChart data={slicedPriceData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
                 <defs>
                   <linearGradient id="priceGrad" x1="0" y1="0" x2="0" y2="1">
                     <stop offset="5%" stopColor={C.blue} stopOpacity={0.25} />
@@ -371,7 +392,6 @@ export default function App() {
                 {gs?.range_high > 0 && <ReferenceLine y={gs.range_high} stroke={C.red} strokeDasharray="4 3" strokeOpacity={0.5} label={{ value: 'Grid High', fill: C.red, fontSize: 10, position: 'right' }} />}
                 {gs?.range_low > 0 && <ReferenceLine y={gs.range_low} stroke={C.green} strokeDasharray="4 3" strokeOpacity={0.5} label={{ value: 'Grid Low', fill: C.green, fontSize: 10, position: 'right' }} />}
                 <Area type="monotone" dataKey="price" stroke={C.blue} strokeWidth={2} fill="url(#priceGrad)" name="BTC Price" dot={<TradeDot />} activeDot={{ r: 4, fill: C.blue }} isAnimationActive={false} />
-                <Brush dataKey="time" height={24} stroke={C.border} fill="#0e1117" travellerWidth={8} startIndex={Math.max(0, priceData.length - 60)} />
               </AreaChart>
             </ResponsiveContainer>
           ) : (
@@ -385,7 +405,7 @@ export default function App() {
           (equity_history || []).length > 1 ? (
             <>
               <ResponsiveContainer width="100%" height={200}>
-                <AreaChart data={equity_history} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+                <AreaChart data={slicedEqData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
                   <defs>
                     <linearGradient id="eqGrad" x1="0" y1="0" x2="0" y2="1">
                       <stop offset="5%" stopColor={C.green} stopOpacity={0.25} />
@@ -398,18 +418,17 @@ export default function App() {
                   <Tooltip content={<ChartTooltip />} />
                   <ReferenceLine y={pf?.initial_balance} stroke={C.yellow} strokeDasharray="6 3" strokeOpacity={0.5} />
                   <Area type="monotone" dataKey="value" stroke={C.green} strokeWidth={2} fill="url(#eqGrad)" name="Equity $" dot={false} isAnimationActive={false} />
-                  <Brush dataKey="time" height={24} stroke={C.border} fill="#0e1117" travellerWidth={8} startIndex={Math.max(0, (equity_history||[]).length - 60)} />
                 </AreaChart>
               </ResponsiveContainer>
               <div style={{ marginTop: '12px' }}>
                 <ResponsiveContainer width="100%" height={80}>
-                  <BarChart data={equity_history} margin={{ top: 0, right: 8, left: 0, bottom: 0 }}>
+                  <BarChart data={slicedEqData} margin={{ top: 0, right: 8, left: 0, bottom: 0 }}>
                     <XAxis dataKey="time" hide />
                     <YAxis tick={{ fill: C.muted, fontSize: 9 }} tickLine={false} axisLine={false} tickFormatter={v => `$${v}`} width={48} />
                     <Tooltip content={<ChartTooltip />} />
                     <Bar dataKey="pnl" name="P&L $" fill={C.blue} radius={[2, 2, 0, 0]} isAnimationActive={false}
                       label={false}
-                      cell={equity_history.map((e, i) => <cell key={i} fill={e.pnl >= 0 ? C.green : C.red} />)}
+                      cell={slicedEqData.map((e, i) => <cell key={i} fill={e.pnl >= 0 ? C.green : C.red} />)}
                     />
                   </BarChart>
                 </ResponsiveContainer>
