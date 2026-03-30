@@ -2,7 +2,158 @@
 @tailwind components;
 @tailwind utilities;
 
+* { box-sizing: border-box; }
+
 body {
   margin: 0;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+  background: #080b0f;
+  color: #e2e8f0;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Grid layouts */
+.grid-3 {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.grid-2 {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.grid-1 {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+/* Settings inputs grid */
+.settings-inputs {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.settings-toggles {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+/* Stat grid inside cards */
+.stat-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+/* Header */
+.tb-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.tb-header-left {
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.tb-price {
+  font-size: 2.4rem;
+  font-weight: 800;
+  color: #fff;
+  letter-spacing: -1px;
+  margin: 0;
+}
+
+/* Chart window buttons */
+.chart-btns {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+/* Log box */
+.log-box {
+  background: #080b0f;
+  border-radius: 6px;
+  padding: 10px 12px;
+  height: 200px;
+  overflow-y: auto;
+  font-family: monospace;
+  font-size: 0.82rem;
+  border: 1px solid #1e2433;
+}
+
+/* ── Mobile ── */
+@media (max-width: 768px) {
+  .tb-root {
+    padding: 12px !important;
+  }
+
+  .tb-price {
+    font-size: 1.8rem;
+  }
+
+  .grid-3, .grid-2 {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-inputs {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .settings-toggles {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .chart-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+  }
+
+  .chart-btns {
+    width: 100%;
+  }
+
+  .log-box {
+    height: 160px;
+    font-size: 0.75rem;
+  }
+
+  /* Smaller stat values on mobile */
+  .stat-val {
+    font-size: 0.92rem !important;
+  }
+}
+
+@media (max-width: 480px) {
+  .settings-inputs {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-toggles {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .tb-price {
+    font-size: 1.5rem;
+  }
 }
