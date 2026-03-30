@@ -3,8 +3,6 @@ name: Deploy TradingBot Frontend
 on:
   push:
     branches: [main]
-    paths:
-      - 'Frontend/**'
 
 jobs:
   deploy:
