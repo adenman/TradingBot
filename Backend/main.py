@@ -186,6 +186,15 @@ state = {
         "live_trading": False,           # LIVE MODE — places real orders on Coinbase
         "live_order_type": "market",     # market | limit
         "daily_loss_limit_usd": 20.0,   # Hard stop: max USD loss per day in live mode
+        # ── Trend Trading ────────────────────────────────────────────────────
+        "trend_trading": False,
+        "trend_allocation_usd": 500.0,
+        "grid_allocation_usd": 500.0,
+        "trend_stop_loss_pct": 3.0,
+        "trend_take_profit_pct": 6.0,
+        "trend_position_size_pct": 0.8,
+        "trend_min_strength": 0.3,
+        "trend_cooldown_seconds": 300,
     },
     "grid_state": {
         "initialized": False,
@@ -238,15 +247,27 @@ state = {
         "total_volume": 0.0,
     },
     "portfolio": {
-        "initial_balance": 200.00,
-        "cash": 200.00,
+        "initial_balance": 1000.00,
+        "cash": 1000.00,
+        "grid_cash": 500.00,
+        "trend_cash": 500.00,
         "holdings": {"BTC/USD": 0.0},
         "cost_basis": {"BTC/USD": 0.0},
-        "total_value": 200.00,
+        "total_value": 1000.00,
         "total_profit": 0.00,
         "total_fees": 0.00,
         "realized_pnl": 0.00,
         "unrealized_pnl": 0.00,
+        "trend_holdings": 0.0,
+        "trend_cost_basis": 0.0,
+        "trend_realized_pnl": 0.0,
+        "trend_unrealized_pnl": 0.0,
+    },
+    "trend_state": {
+        "position": None,
+        "last_trade_time": 0,
+        "signal": "NONE",
+        "consecutive_signals": 0,
     },
     "circuit_breaker": {
         "active": False,
@@ -287,6 +308,9 @@ def load_state():
                         state["settings"][k] = v
                 state["stats"].update(saved_data.get("stats", {}))
                 state["grid_state"].update(saved_data.get("grid_state", {}))
+                saved_trend = saved_data.get("trend_state", {})
+                for k, v in saved_trend.items():
+                    state["trend_state"][k] = v
             logger.info("💾 Loaded previous portfolio, settings & stats from disk.")
         except Exception as e:
             logger.error(f"Failed to load state: {e}")
@@ -300,6 +324,7 @@ def save_state():
                 "settings": state["settings"],
                 "stats": state["stats"],
                 "grid_state": serializable_grid,
+                "trend_state": state["trend_state"],
             }, f, indent=4)
     except Exception as e:
         logger.error(f"Failed to save state: {e}")
@@ -348,6 +373,18 @@ def get_broadcast_payload():
         "price_chart": state["price_chart"][-10080:],   # up to 1 week of 1m candles
         "equity_history": state["equity_history"][-10080:],
         "trade_markers": state["trade_markers"][-500:],
+        "trend_state": {
+            "signal": state["trend_state"]["signal"],
+            "position": state["trend_state"]["position"],
+            "consecutive_signals": state["trend_state"]["consecutive_signals"],
+        },
+        "trend_portfolio": {
+            "grid_cash": state["portfolio"].get("grid_cash", 500.0),
+            "trend_cash": state["portfolio"].get("trend_cash", 500.0),
+            "trend_holdings": state["portfolio"].get("trend_holdings", 0.0),
+            "trend_realized_pnl": state["portfolio"].get("trend_realized_pnl", 0.0),
+            "trend_unrealized_pnl": state["portfolio"].get("trend_unrealized_pnl", 0.0),
+        },
     }
 
 
@@ -796,7 +833,7 @@ async def execute_trade(symbol, action, current_price, trade_usd_amount, level_i
     pnl = 0.0
 
     if action == "BUY":
-        if state["portfolio"]["cash"] < trade_usd_amount:
+        if state["portfolio"]["grid_cash"] < trade_usd_amount:
             return False
         if len(state["grid_state"]["filled_levels"]) >= state["settings"]["max_open_positions"]:
             return False
@@ -804,7 +841,8 @@ async def execute_trade(symbol, action, current_price, trade_usd_amount, level_i
         fee = calculate_fees(trade_usd_amount)
         qty = round(float((trade_usd_amount - fee) / exec_price), 8)
 
-        state["portfolio"]["cash"] = round(state["portfolio"]["cash"] - trade_usd_amount, 2)
+        state["portfolio"]["grid_cash"] = round(state["portfolio"].get("grid_cash", 500.0) - trade_usd_amount, 2)
+        state["portfolio"]["cash"] = round(state["portfolio"]["grid_cash"] + state["portfolio"].get("trend_cash", 500.0), 2)
         state["portfolio"]["total_fees"] = round(state["portfolio"]["total_fees"] + fee, 4)
         state["portfolio"]["holdings"][symbol] = round(state["portfolio"]["holdings"][symbol] + qty, 8)
 
@@ -853,7 +891,8 @@ async def execute_trade(symbol, action, current_price, trade_usd_amount, level_i
         net_sale = sale_value - fee
         pnl = round(net_sale - entry_cost, 2)
 
-        state["portfolio"]["cash"] = round(state["portfolio"]["cash"] + net_sale, 2)
+        state["portfolio"]["grid_cash"] = round(state["portfolio"].get("grid_cash", 500.0) + net_sale, 2)
+        state["portfolio"]["cash"] = round(state["portfolio"]["grid_cash"] + state["portfolio"].get("trend_cash", 500.0), 2)
         state["portfolio"]["total_fees"] = round(state["portfolio"]["total_fees"] + fee, 4)
         state["portfolio"]["holdings"][symbol] = round(state["portfolio"]["holdings"][symbol] - qty_to_sell, 8)
         state["portfolio"]["realized_pnl"] = round(state["portfolio"]["realized_pnl"] + pnl, 2)
@@ -939,7 +978,7 @@ async def evaluate_grid(symbol, price):
         next_idx = curr_idx - 1
         if str(next_idx) not in state["grid_state"]["filled_levels"]:
             if check_cooldown(next_idx) and check_trend_filter("BUY"):
-                if state["portfolio"]["cash"] >= trade_size:
+                if state["portfolio"].get("grid_cash", 500.0) >= trade_size:
                     success = await execute_trade(symbol, "BUY", price, trade_size, level_idx=next_idx)
                     if success:
                         trades_this_tick += 1
@@ -972,6 +1011,135 @@ async def evaluate_grid(symbol, price):
                 if price <= trail_high * (1.0 - lock_pct):
                     await log_event(f"🔒 Trailing TP triggered for Grid #{level_key} @ ${price:.2f} (high ${trail_high:.2f})")
                     await execute_trade(symbol, "SELL", price, get_trade_size(price), level_idx=int(level_key))
+
+
+# ── Trend Trading Engine ──────────────────────────────────────────────────────
+
+def get_trend_signal():
+    ind = state["indicators"]["BTC/USD"]
+    trend_1m = ind.get("trend", "NEUTRAL")
+    trend_5m = ind.get("trend_5m", "NEUTRAL")
+    mtf_agreement = ind.get("mtf_agreement", False)
+    strength = ind.get("trend_strength", 0.0)
+    rsi = ind.get("rsi", 50.0)
+    macd_hist = ind.get("macd_histogram", 0.0)
+    min_strength = state["settings"].get("trend_min_strength", 0.3)
+    in_position = state["trend_state"]["position"] is not None
+
+    if in_position:
+        if (trend_1m == "BEARISH" or
+                (trend_5m == "BEARISH" and not mtf_agreement) or
+                rsi > 78 or
+                macd_hist < 0):
+            return "EXIT"
+
+    if (trend_1m == "BULLISH" and
+            trend_5m == "BULLISH" and
+            mtf_agreement and
+            strength >= min_strength and
+            rsi < 70 and
+            macd_hist > 0):
+        return "LONG"
+
+    return "NONE"
+
+
+async def evaluate_trend(symbol, price):
+    ts = state["trend_state"]
+    settings = state["settings"]
+    portfolio = state["portfolio"]
+
+    signal = get_trend_signal()
+    ts["signal"] = signal
+
+    now = time.time()
+    position = ts["position"]
+
+    # Update trailing stop and unrealized PnL if in position
+    if position:
+        if price > position["high_water_mark"]:
+            position["high_water_mark"] = price
+            trail_stop = position["high_water_mark"] * (1 - 1.5 / 100)
+            position["stop_loss"] = max(position["stop_loss"], trail_stop)
+
+        portfolio["trend_unrealized_pnl"] = round(
+            (price - position["entry_price"]) * position["qty"], 2
+        )
+
+        # Check exit conditions
+        exit_reason = None
+        if price <= position["stop_loss"]:
+            exit_reason = "Stop Loss 🛑"
+        elif price >= position["take_profit"]:
+            exit_reason = "Take Profit 🎯"
+        elif signal == "EXIT":
+            exit_reason = "Signal 📉"
+
+        if exit_reason:
+            qty = position["qty"]
+            cost = position["cost"]
+            fee = round(qty * price * settings["fee_rate"], 4)
+            sale_value = round(qty * price - fee, 2)
+            pnl = round(sale_value - cost, 2)
+
+            portfolio["trend_cash"] = round(portfolio.get("trend_cash", 500.0) + sale_value, 2)
+            portfolio["trend_holdings"] = round(max(0.0, portfolio.get("trend_holdings", 0.0) - qty), 8)
+            portfolio["trend_realized_pnl"] = round(portfolio.get("trend_realized_pnl", 0.0) + pnl, 2)
+            portfolio["total_fees"] = round(portfolio["total_fees"] + fee, 4)
+            portfolio["trend_unrealized_pnl"] = 0.0
+            portfolio["cash"] = round(portfolio.get("grid_cash", 500.0) + portfolio["trend_cash"], 2)
+
+            ts["position"] = None
+            ts["last_trade_time"] = now
+
+            pnl_emoji = "✅" if pnl >= 0 else "❌"
+            await log_event(f"📉 TREND EXIT ({exit_reason}) @ ${price:.2f} | P&L: {pnl_emoji}${pnl:.2f} | Total Trend P&L: ${portfolio['trend_realized_pnl']:.2f}")
+            await tg_notify(f"📉 <b>TREND EXIT</b> ({exit_reason})\n@ ${price:.2f} | P&L: {pnl_emoji} ${pnl:.2f}\nTotal Trend P&L: ${portfolio['trend_realized_pnl']:.2f}")
+            return
+
+    # Entry logic
+    if signal == "LONG" and position is None:
+        cooldown = settings.get("trend_cooldown_seconds", 300)
+        if now - ts["last_trade_time"] < cooldown:
+            return
+
+        ts["consecutive_signals"] = ts.get("consecutive_signals", 0) + 1
+        if ts["consecutive_signals"] < 2:
+            return
+
+        trade_usd = settings["trend_allocation_usd"] * settings["trend_position_size_pct"]
+        trend_cash = portfolio.get("trend_cash", 500.0)
+        trade_usd = min(trade_usd, trend_cash)
+        if trade_usd < 10:
+            return
+
+        fee = round(trade_usd * settings["fee_rate"], 4)
+        qty = round((trade_usd - fee) / price, 8)
+        stop_loss = round(price * (1 - settings["trend_stop_loss_pct"] / 100), 2)
+        take_profit = round(price * (1 + settings["trend_take_profit_pct"] / 100), 2)
+
+        portfolio["trend_cash"] = round(trend_cash - trade_usd, 2)
+        portfolio["trend_holdings"] = round(portfolio.get("trend_holdings", 0.0) + qty, 8)
+        portfolio["total_fees"] = round(portfolio["total_fees"] + fee, 4)
+        portfolio["cash"] = round(portfolio.get("grid_cash", 500.0) + portfolio["trend_cash"], 2)
+
+        ts["position"] = {
+            "entry_price": price,
+            "qty": qty,
+            "cost": trade_usd,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "entry_time": now,
+            "high_water_mark": price,
+        }
+        ts["last_trade_time"] = now
+        ts["consecutive_signals"] = 0
+
+        await log_event(f"📈 TREND BUY ${trade_usd:.2f} @ ${price:.2f} | SL: ${stop_loss:.2f} | TP: ${take_profit:.2f}")
+        await tg_notify(f"📈 <b>TREND BUY</b> ${trade_usd:.2f} @ ${price:.2f}\nSL: ${stop_loss:.2f} | TP: ${take_profit:.2f}")
+    else:
+        if signal != "LONG":
+            ts["consecutive_signals"] = 0
 
 
 async def process_price_update(symbol, price, volume=0.0):
@@ -1064,7 +1232,11 @@ async def process_price_update(symbol, price, volume=0.0):
 
     # Portfolio value tracking
     h_val = round(float(state["portfolio"]["holdings"][symbol] * price), 2)
-    state["portfolio"]["total_value"] = round(float(state["portfolio"]["cash"] + h_val), 2)
+    trend_h_val = round(float(state["portfolio"].get("trend_holdings", 0.0) * price), 2)
+    state["portfolio"]["grid_cash"] = state["portfolio"].get("grid_cash", 500.0)
+    state["portfolio"]["trend_cash"] = state["portfolio"].get("trend_cash", 500.0)
+    state["portfolio"]["cash"] = round(state["portfolio"]["grid_cash"] + state["portfolio"]["trend_cash"], 2)
+    state["portfolio"]["total_value"] = round(float(state["portfolio"]["cash"] + h_val + trend_h_val), 2)
     state["portfolio"]["total_profit"] = round(float(state["portfolio"]["total_value"] - state["portfolio"]["initial_balance"]), 2)
 
     # Unrealized P&L
@@ -1079,6 +1251,7 @@ async def process_price_update(symbol, price, volume=0.0):
         state["stats"]["peak_value"] = round(state["portfolio"]["total_value"], 2)
 
     await evaluate_grid(symbol, price)
+    await evaluate_trend(symbol, price)
     await manager.broadcast_state()
 
 
@@ -1266,9 +1439,14 @@ async def websocket_endpoint(ws: WebSocket):
                         reinit = True
 
                     # Boolean toggles
-                    for flag in ("volume_filter", "mtf_trend_filter", "trend_filter", "volatility_scaling", "auto_range", "live_trading"):
+                    for flag in ("volume_filter", "mtf_trend_filter", "trend_filter", "volatility_scaling", "auto_range", "live_trading", "trend_trading"):
                         if flag in payload:
                             state["settings"][flag] = bool(payload[flag])
+
+                    # Trend settings
+                    for key in ("trend_stop_loss_pct", "trend_take_profit_pct", "trend_position_size_pct", "trend_min_strength", "trend_allocation_usd", "grid_allocation_usd", "trend_cooldown_seconds"):
+                        if key in payload:
+                            state["settings"][key] = float(payload[key])
 
                     if reinit:
                         state["grid_state"]["initialized"] = False
