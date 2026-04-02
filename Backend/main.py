@@ -349,7 +349,8 @@ class ConnectionManager:
             try:
                 await c.send_json(payload)
             except Exception:
-                self.active_connections.remove(c)
+                if c in self.active_connections:
+                    self.active_connections.remove(c)
 
 
 def get_broadcast_payload():
