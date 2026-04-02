@@ -302,6 +302,17 @@ def load_state():
             with open(STATE_FILE, 'r') as f:
                 saved_data = json.load(f)
                 state["portfolio"].update(saved_data.get("portfolio", {}))
+                # Migrate old portfolios to new split cash system
+                if "grid_cash" not in saved_data.get("portfolio", {}):
+                    old_cash = state["portfolio"].get("cash", 1000.0)
+                    state["portfolio"]["grid_cash"] = round(old_cash / 2, 2)
+                    state["portfolio"]["trend_cash"] = round(old_cash / 2, 2)
+                    state["portfolio"]["initial_balance"] = 1000.0
+                    state["portfolio"]["cash"] = 1000.0
+                if "trend_holdings" not in state["portfolio"]:
+                    state["portfolio"]["trend_holdings"] = 0.0
+                    state["portfolio"]["trend_realized_pnl"] = 0.0
+                    state["portfolio"]["trend_unrealized_pnl"] = 0.0
                 saved_settings = saved_data.get("settings", {})
                 for k, v in saved_settings.items():
                     if k in state["settings"]:
