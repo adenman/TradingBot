@@ -109,7 +109,7 @@ export default function App() {
 
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
-    const ws = new WebSocket('wss://eloy-precedentless-nonprohibitorily.ngrok-free.dev/ws');
+    const ws = new WebSocket('wss://tradingbot-production-9bca.up.railway.app/ws');
     wsRef.current = ws;
     ws.onopen = () => { setConn('Connected'); clearTimeout(reconnRef.current); };
     ws.onmessage = (e) => {
