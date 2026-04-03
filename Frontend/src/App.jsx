@@ -44,6 +44,11 @@ function TrendBadge({ trend }) {
   return <Badge color={color}>{trend || 'NEUTRAL'}</Badge>;
 }
 
+function SignalBadge({ signal }) {
+  const color = signal === 'LONG' ? C.green : signal === 'EXIT' ? C.orange : C.muted;
+  return <Badge color={color}>{signal || 'NONE'}</Badge>;
+}
+
 function StrengthBar({ value, color }) {
   return (
     <div style={{ height: '3px', backgroundColor: C.subtle, borderRadius: '2px', marginTop: '5px', overflow: 'hidden' }}>
@@ -102,7 +107,7 @@ export default function App() {
   const [priceWindow, setPriceWindow] = useState(60);
   const [eqWindow, setEqWindow] = useState(60);
   const [form, setForm] = useState({});
-  const [toggles, setToggles] = useState({});
+  const [liveTrading, setLiveTrading] = useState(false);
   const wsRef = useRef(null);
   const reconnRef = useRef(null);
   const logBoxRef = useRef(null);
@@ -116,13 +121,7 @@ export default function App() {
       try {
         const data = JSON.parse(e.data);
         setBot(data);
-        setToggles(prev => Object.keys(prev).length ? prev : {
-          volume_filter: data.settings?.volume_filter ?? true,
-          mtf_trend_filter: data.settings?.mtf_trend_filter ?? true,
-          trend_filter: data.settings?.trend_filter ?? true,
-          volatility_scaling: data.settings?.volatility_scaling ?? true,
-          auto_range: data.settings?.auto_range ?? true,
-        });
+        setLiveTrading(prev => prev !== (data.settings?.live_trading ?? false) ? (data.settings?.live_trading ?? false) : prev);
       } catch {}
     };
     ws.onclose = () => { setConn('Disconnected'); reconnRef.current = setTimeout(connect, 3000); };
@@ -140,12 +139,14 @@ export default function App() {
   const saveSettings = (e) => {
     e.preventDefault();
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
-    const p = { type: 'UPDATE_SETTINGS', ...toggles };
+    const p = { type: 'UPDATE_SETTINGS', live_trading: liveTrading };
     if (form.cash) p.cash = parseFloat(form.cash);
-    if (form.trade_size_usd) p.trade_size_usd = parseFloat(form.trade_size_usd);
-    if (form.grid_levels) p.grid_levels = parseInt(form.grid_levels);
-    if (form.grid_upper) p.grid_upper = parseFloat(form.grid_upper);
-    if (form.grid_lower) p.grid_lower = parseFloat(form.grid_lower);
+    if (form.trend_allocation_usd) p.trend_allocation_usd = parseFloat(form.trend_allocation_usd);
+    if (form.trend_stop_loss_pct) p.trend_stop_loss_pct = parseFloat(form.trend_stop_loss_pct);
+    if (form.trend_take_profit_pct) p.trend_take_profit_pct = parseFloat(form.trend_take_profit_pct);
+    if (form.trend_position_size_pct) p.trend_position_size_pct = parseFloat(form.trend_position_size_pct);
+    if (form.trend_min_strength) p.trend_min_strength = parseFloat(form.trend_min_strength);
+    if (form.trend_cooldown_seconds) p.trend_cooldown_seconds = parseFloat(form.trend_cooldown_seconds);
     wsRef.current.send(JSON.stringify(p));
     setForm({});
   };
@@ -153,16 +154,18 @@ export default function App() {
   if (!bot) {
     return (
       <div style={{ minHeight: '100vh', backgroundColor: C.bg, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '12px' }}>
-        <div style={{ fontSize: '1.5rem' }}>⚡</div>
+        <div style={{ fontSize: '1.5rem' }}>📈</div>
         <div style={{ color: C.muted, fontSize: '0.9rem' }}>{conn} — waiting for backend</div>
       </div>
     );
   }
 
-  const { prices, portfolio: pf, indicators, macro, logs, settings, stats: st, grid_state: gs, circuit_breaker: cb, price_chart, equity_history, trade_markers } = bot;
+  const { prices, portfolio: pf, indicators, macro, logs, settings, stats: st, circuit_breaker: cb, price_chart, equity_history, trade_markers, trend_state } = bot;
   const btcPrice = prices?.['BTC/USD'] || 0;
   const ind = indicators?.['BTC/USD'] || {};
   const btcMacro = macro?.['BTC/USD'] || {};
+  const ts = trend_state || {};
+  const pos = ts.position;
 
   const mkrMap = {};
   (trade_markers || []).forEach(m => {
@@ -188,7 +191,7 @@ export default function App() {
       {/* Header */}
       <header className="tb-header">
         <div className="tb-header-left">
-          <span style={{ fontSize: '0.75rem', color: C.muted, fontWeight: 700, letterSpacing: '1.5px', textTransform: 'uppercase' }}>⚡ Adaptive Grid</span>
+          <span style={{ fontSize: '0.75rem', color: C.muted, fontWeight: 700, letterSpacing: '1.5px', textTransform: 'uppercase' }}>📈 Trend Bot</span>
           <span className="tb-price">{fmt$(btcPrice, 2)}</span>
           {btcMacro.trend_pct != null && <Badge color={btcMacro.trend_pct >= 0 ? C.green : C.red}>90d {btcMacro.trend_pct >= 0 ? '+' : ''}{btcMacro.trend_pct?.toFixed(1)}%</Badge>}
           <TrendBadge trend={ind.trend} />
@@ -207,44 +210,63 @@ export default function App() {
 
       {/* Row 1: Stats */}
       <div className="grid-3">
+        {/* Portfolio */}
         <div style={card}>
           <div style={cardTitle}>Portfolio</div>
           <div className="stat-grid">
             <Stat label="Total Value" value={fmt$(pf?.total_value)} />
             <Stat label="Total P&L" value={`${pf?.total_profit >= 0 ? '+' : ''}${fmt$(pf?.total_profit)}`} color={clr(pf?.total_profit)} />
             <Stat label="Cash" value={fmt$(pf?.cash)} />
-            <Stat label="BTC" value={pf?.holdings?.['BTC/USD']?.toFixed(6)} />
-            <Stat label="Unrealized" value={`${pf?.unrealized_pnl >= 0 ? '+' : ''}${fmt$(pf?.unrealized_pnl)}`} color={clr(pf?.unrealized_pnl)} />
-            <Stat label="Realized" value={`${pf?.realized_pnl >= 0 ? '+' : ''}${fmt$(pf?.realized_pnl)}`} color={clr(pf?.realized_pnl)} />
+            <Stat label="BTC Holdings" value={pf?.trend_holdings > 0 ? pf.trend_holdings.toFixed(6) : '—'} />
+            <Stat label="Unrealized" value={`${(pf?.trend_unrealized_pnl ?? 0) >= 0 ? '+' : ''}${fmt$(pf?.trend_unrealized_pnl)}`} color={clr(pf?.trend_unrealized_pnl)} />
+            <Stat label="Realized P&L" value={`${(pf?.trend_realized_pnl ?? 0) >= 0 ? '+' : ''}${fmt$(pf?.trend_realized_pnl)}`} color={clr(pf?.trend_realized_pnl)} />
             <Stat label="Fees Paid" value={fmt$(pf?.total_fees, 4)} color={C.orange} />
-            <Stat label="Cost Basis" value={pf?.cost_basis?.['BTC/USD'] > 0 ? fmt$(pf.cost_basis['BTC/USD'], 0) : '—'} />
+            <Stat label="Initial Balance" value={fmt$(pf?.initial_balance)} />
           </div>
         </div>
 
+        {/* Trend Position */}
         <div style={card}>
-          <div style={cardTitle}>Grid State</div>
-          <div className="stat-grid">
-            <Stat label="Status" value={gs?.initialized ? '✅ Active' : '⏳ Init'} color={gs?.initialized ? C.green : C.yellow} />
-            <Stat label="Positions" value={`${gs?.open_positions} / ${settings?.max_open_positions}`} color={gs?.open_positions > 0 ? C.blue : C.muted} />
-            <Stat label="Range Low" value={gs?.range_low > 0 ? fmt$(gs.range_low, 0) : '—'} />
-            <Stat label="Range High" value={gs?.range_high > 0 ? fmt$(gs.range_high, 0) : '—'} />
-            <Stat label="Levels" value={gs?.levels_count || settings?.grid_levels} />
-            <Stat label="Index" value={gs?.current_index >= 0 ? gs.current_index : '—'} />
+          <div style={cardTitle}>Trend Position</div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '14px' }}>
+            <SignalBadge signal={ts.signal} />
+            <Badge color={pos ? C.green : C.muted}>{pos ? 'In Trade' : 'No Position'}</Badge>
           </div>
-          {gs?.range_low > 0 && gs?.range_high > 0 && (
+          {pos ? (
+            <div className="stat-grid">
+              <Stat label="Entry Price" value={fmt$(pos.entry_price, 0)} />
+              <Stat label="Stop Loss" value={fmt$(pos.stop_loss, 0)} color={C.red} />
+              <Stat label="Take Profit" value={fmt$(pos.take_profit, 0)} color={C.green} />
+              <Stat label="Qty (BTC)" value={pos.qty?.toFixed(6)} />
+              <Stat label="Unrealized" value={`${(pf?.trend_unrealized_pnl ?? 0) >= 0 ? '+' : ''}${fmt$(pf?.trend_unrealized_pnl)}`} color={clr(pf?.trend_unrealized_pnl)} />
+              <Stat label="Cost" value={fmt$(pos.cost)} />
+            </div>
+          ) : (
+            <div className="stat-grid">
+              <Stat label="Consec. Signals" value={ts.consecutive_signals ?? 0} color={ts.consecutive_signals > 0 ? C.yellow : C.muted} />
+              <Stat label="Trend Realized" value={`${(pf?.trend_realized_pnl ?? 0) >= 0 ? '+' : ''}${fmt$(pf?.trend_realized_pnl)}`} color={clr(pf?.trend_realized_pnl)} />
+            </div>
+          )}
+          {pos && (
             <div style={{ marginTop: '12px' }}>
               <div style={{ height: '5px', backgroundColor: C.subtle, borderRadius: '3px', overflow: 'hidden' }}>
-                <div style={{ height: '100%', width: `${Math.max(0, Math.min(100, (btcPrice - gs.range_low) / (gs.range_high - gs.range_low) * 100))}%`, backgroundColor: C.blue, borderRadius: '3px', transition: 'width 0.3s' }} />
+                <div style={{
+                  height: '100%',
+                  width: `${Math.max(0, Math.min(100, (btcPrice - pos.stop_loss) / (pos.take_profit - pos.stop_loss) * 100))}%`,
+                  backgroundColor: (pf?.trend_unrealized_pnl ?? 0) >= 0 ? C.green : C.red,
+                  borderRadius: '3px', transition: 'width 0.3s'
+                }} />
               </div>
               <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.65rem', color: C.muted, marginTop: '3px' }}>
-                <span>{fmt$(gs.range_low, 0)}</span>
+                <span style={{ color: C.red }}>{fmt$(pos.stop_loss, 0)} SL</span>
                 <span style={{ color: C.text }}>{fmt$(btcPrice, 0)}</span>
-                <span>{fmt$(gs.range_high, 0)}</span>
+                <span style={{ color: C.green }}>{fmt$(pos.take_profit, 0)} TP</span>
               </div>
             </div>
           )}
         </div>
 
+        {/* Trade Stats */}
         <div style={card}>
           <div style={cardTitle}>Trade Stats</div>
           <div className="stat-grid">
@@ -286,8 +308,9 @@ export default function App() {
                 <XAxis dataKey="time" tick={{ fill: C.muted, fontSize: 9 }} tickLine={false} axisLine={false} minTickGap={40} />
                 <YAxis domain={['auto', 'auto']} tick={{ fill: C.muted, fontSize: 9 }} tickLine={false} axisLine={false} tickFormatter={v => `$${v.toLocaleString()}`} width={68} />
                 <Tooltip content={<ChartTooltip />} />
-                {gs?.range_high > 0 && <ReferenceLine y={gs.range_high} stroke={C.red} strokeDasharray="4 3" strokeOpacity={0.5} />}
-                {gs?.range_low > 0 && <ReferenceLine y={gs.range_low} stroke={C.green} strokeDasharray="4 3" strokeOpacity={0.5} />}
+                {pos && <ReferenceLine y={pos.stop_loss} stroke={C.red} strokeDasharray="4 3" strokeOpacity={0.6} label={{ value: 'SL', fill: C.red, fontSize: 9 }} />}
+                {pos && <ReferenceLine y={pos.take_profit} stroke={C.green} strokeDasharray="4 3" strokeOpacity={0.6} label={{ value: 'TP', fill: C.green, fontSize: 9 }} />}
+                {pos && <ReferenceLine y={pos.entry_price} stroke={C.yellow} strokeDasharray="3 3" strokeOpacity={0.5} label={{ value: 'Entry', fill: C.yellow, fontSize: 9 }} />}
                 <Area type="monotone" dataKey="price" stroke={C.blue} strokeWidth={2} fill="url(#priceGrad)" name="BTC Price" dot={<TradeDot />} activeDot={{ r: 4, fill: C.blue }} isAnimationActive={false} />
               </AreaChart>
             </ResponsiveContainer>
@@ -384,10 +407,12 @@ export default function App() {
           <div className="settings-inputs">
             {[
               { key: 'cash', label: 'Cash ($)', ph: pf?.cash?.toFixed(2) },
-              { key: 'trade_size_usd', label: 'Trade Size ($)', ph: settings?.trade_size_usd },
-              { key: 'grid_levels', label: 'Grid Levels', ph: settings?.grid_levels },
-              { key: 'grid_lower', label: 'Grid Lower ($)', ph: settings?.grid_lower > 0 ? settings.grid_lower : 'auto' },
-              { key: 'grid_upper', label: 'Grid Upper ($)', ph: settings?.grid_upper > 0 ? settings.grid_upper : 'auto' },
+              { key: 'trend_allocation_usd', label: 'Allocation ($)', ph: settings?.trend_allocation_usd },
+              { key: 'trend_stop_loss_pct', label: 'Stop Loss %', ph: settings?.trend_stop_loss_pct },
+              { key: 'trend_take_profit_pct', label: 'Take Profit %', ph: settings?.trend_take_profit_pct },
+              { key: 'trend_position_size_pct', label: 'Position Size %', ph: settings?.trend_position_size_pct },
+              { key: 'trend_min_strength', label: 'Min Strength', ph: settings?.trend_min_strength },
+              { key: 'trend_cooldown_seconds', label: 'Cooldown (sec)', ph: settings?.trend_cooldown_seconds },
             ].map(({ key, label, ph }) => (
               <div key={key}>
                 <label style={{ ...statLabel, display: 'block', marginBottom: '5px' }}>{label}</label>
@@ -395,39 +420,28 @@ export default function App() {
               </div>
             ))}
           </div>
-          <div className="settings-toggles">
-            {[
-              { key: 'volume_filter', label: 'Volume Filter' },
-              { key: 'mtf_trend_filter', label: 'MTF Filter' },
-              { key: 'trend_filter', label: 'Trend Filter' },
-              { key: 'volatility_scaling', label: 'Vol. Scaling' },
-              { key: 'auto_range', label: 'Auto Range' },
-            ].map(({ key, label }) => (
-              <Toggle key={key} label={label} value={toggles[key] ?? settings?.[key] ?? true} onChange={v => setToggles(t => ({ ...t, [key]: v }))} />
-            ))}
-          </div>
 
-          {/* Live Trading Toggle — separate section with warning */}
-          <div style={{ borderTop: `1px solid ${C.border}`, paddingTop: '14px', marginBottom: '16px' }}>
+          {/* Live Trading Toggle */}
+          <div style={{ borderTop: `1px solid ${C.border}`, paddingTop: '14px', marginBottom: '16px', marginTop: '16px' }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '10px' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                 <Toggle
                   label=""
-                  value={toggles['live_trading'] ?? settings?.live_trading ?? false}
+                  value={liveTrading}
                   onChange={v => {
                     if (v && !window.confirm('⚠️ ENABLE LIVE TRADING?\n\nThis will place REAL orders with REAL money on Coinbase.\n\nMake sure you understand the risks. Continue?')) return;
-                    setToggles(t => ({ ...t, live_trading: v }));
+                    setLiveTrading(v);
                   }}
                 />
-                <span style={{ fontWeight: 700, color: (toggles['live_trading'] ?? settings?.live_trading) ? C.red : C.muted, fontSize: '0.9rem' }}>
-                  {(toggles['live_trading'] ?? settings?.live_trading) ? '🔴 LIVE TRADING — REAL MONEY' : '⚪ Paper Trading'}
+                <span style={{ fontWeight: 700, color: liveTrading ? C.red : C.muted, fontSize: '0.9rem' }}>
+                  {liveTrading ? '🔴 LIVE TRADING — REAL MONEY' : '⚪ Paper Trading'}
                 </span>
               </div>
-              {(toggles['live_trading'] ?? settings?.live_trading) && (
+              {liveTrading && (
                 <Badge color={C.red}>Daily Loss Limit: ${settings?.daily_loss_limit_usd ?? 20}</Badge>
               )}
             </div>
-            {(toggles['live_trading'] ?? settings?.live_trading) && (
+            {liveTrading && (
               <div style={{ marginTop: '8px', fontSize: '0.78rem', color: C.orange, backgroundColor: '#7f1d1d22', border: `1px solid ${C.red}33`, borderRadius: '6px', padding: '8px 12px' }}>
                 ⚠️ Live mode active — bot is placing real orders on Coinbase. Monitor closely.
               </div>
@@ -446,10 +460,11 @@ export default function App() {
           {[...logs].map((log, i) => {
             let color = C.muted;
             if (log.includes('BUY')) color = C.green;
-            else if (log.includes('SELL')) color = C.red;
+            else if (log.includes('SELL') || log.includes('EXIT')) color = C.red;
             else if (log.includes('CIRCUIT BREAKER')) color = C.orange;
-            else if (log.includes('Trailing TP')) color = C.yellow;
-            else if (log.includes('rebalanc') || log.includes('Grid init') || log.includes('Warmup') || log.includes('WebSocket')) color = C.purple;
+            else if (log.includes('Stop Loss')) color = C.red;
+            else if (log.includes('Take Profit')) color = C.green;
+            else if (log.includes('Warmup') || log.includes('WebSocket')) color = C.purple;
             else if (log.includes('Settings')) color = C.blue;
             return <div key={i} style={{ padding: '3px 0', borderBottom: `1px solid ${C.border}`, color, wordBreak: 'break-all' }}>{log}</div>;
           })}

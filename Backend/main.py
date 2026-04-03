@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("GridBot")
+logger = logging.getLogger("TrendBot")
 
 HEADERS = {"User-Agent": "AlgoBot/1.0"}
 STATE_FILE = "portfolio.json"
@@ -162,55 +162,24 @@ def check_daily_loss_limit() -> bool:
 
 state = {
     "settings": {
-        "strategy": "ADAPTIVE_GRID",     # ADAPTIVE_GRID | STANDARD_GRID
-        "grid_upper": 0.0,               # 0 = auto-compute from ATR
-        "grid_lower": 0.0,               # 0 = auto-compute from ATR
-        "grid_levels": 30,               # Number of grid lines
-        "trade_size_usd": 10.00,         # Base trade size per grid cross
-        "auto_range": True,              # Auto-calculate grid bounds from ATR
-        "atr_multiplier": 3.0,           # How many ATRs wide the grid is
-        "trend_filter": True,            # Only buy in uptrend, sell in downtrend
-        "volatility_scaling": True,      # Scale trade size with volatility
-        "max_trade_size_usd": 30.00,     # Cap on volatility-scaled trade size
-        "cooldown_seconds": 30,          # Min seconds between trades on same level
-        "drawdown_limit_pct": 15.0,      # Max % drawdown before circuit breaker
-        "trailing_take_profit": True,    # Use trailing TP on positions
-        "trailing_tp_pct": 1.5,          # Trailing TP activation %
-        "profit_lock_pct": 0.5,          # Lock in profit when trailing
-        "rebalance_interval": 300,       # Seconds between grid rebalance checks
-        "max_open_positions": 10,        # Max grid levels with open buys
-        "fee_rate": 0.006,               # Coinbase taker fee (0.6%)
-        "slippage_rate": 0.0005,         # Simulated slippage (0.05%)
-        "volume_filter": True,           # Require above-average volume for trades
-        "mtf_trend_filter": True,        # Use 5m candles for multi-timeframe confirmation
-        "live_trading": False,           # LIVE MODE — places real orders on Coinbase
-        "live_order_type": "market",     # market | limit
-        "daily_loss_limit_usd": 20.0,   # Hard stop: max USD loss per day in live mode
-        # ── Trend Trading ────────────────────────────────────────────────────
-        "trend_trading": False,
-        "trend_allocation_usd": 500.0,
-        "grid_allocation_usd": 500.0,
+        "live_trading": False,
+        "live_order_type": "market",
+        "daily_loss_limit_usd": 20.0,
         "trend_stop_loss_pct": 3.0,
         "trend_take_profit_pct": 6.0,
         "trend_position_size_pct": 0.8,
         "trend_min_strength": 0.3,
         "trend_cooldown_seconds": 300,
-    },
-    "grid_state": {
-        "initialized": False,
-        "levels": [],
-        "current_index": -1,
-        "filled_levels": {},             # {level_idx: {"qty": x, "entry_price": y, "time": t}}
-        "last_trade_time": {},           # {level_idx: timestamp} for cooldown
-        "last_rebalance": 0,
-        "range_high": 0.0,
-        "range_low": 0.0,
+        "trend_allocation_usd": 1000.0,
+        "fee_rate": 0.006,
+        "slippage_rate": 0.0005,
+        "drawdown_limit_pct": 15.0,
     },
     "prices": {"BTC/USD": 0.0},
     "history": {"BTC/USD": []},          # 1-min closes
-    "volume_history": {"BTC/USD": []},   # 1-min volumes (aligned with history)
-    "history_5m": {"BTC/USD": []},       # 5-min candles for multi-timeframe
-    "volume_5m": {"BTC/USD": []},        # 5-min volumes
+    "volume_history": {"BTC/USD": []},   # 1-min volumes
+    "history_5m": {"BTC/USD": []},       # 5-min candles
+    "volume_5m": {"BTC/USD": []},
     "indicators": {
         "BTC/USD": {
             "rsi": 50.0,
@@ -219,13 +188,13 @@ state = {
             "volatility": 0.0,
             "atr": 0.0,
             "ema_fast": 0.0, "ema_slow": 0.0,
-            "trend": "NEUTRAL",          # BULLISH | BEARISH | NEUTRAL (1m)
-            "trend_strength": 0.0,       # 0.0 to 1.0
-            "trend_5m": "NEUTRAL",       # 5m timeframe trend
+            "trend": "NEUTRAL",
+            "trend_strength": 0.0,
+            "trend_5m": "NEUTRAL",
             "trend_strength_5m": 0.0,
-            "mtf_agreement": False,      # True when 1m and 5m trend agree
+            "mtf_agreement": False,
             "volume_sma": 0.0,
-            "volume_ratio": 1.0,         # Current volume / SMA (>1 = above average)
+            "volume_ratio": 1.0,
             "stoch_rsi": 50.0,
         }
     },
@@ -249,15 +218,9 @@ state = {
     "portfolio": {
         "initial_balance": 1000.00,
         "cash": 1000.00,
-        "grid_cash": 500.00,
-        "trend_cash": 500.00,
-        "holdings": {"BTC/USD": 0.0},
-        "cost_basis": {"BTC/USD": 0.0},
         "total_value": 1000.00,
         "total_profit": 0.00,
         "total_fees": 0.00,
-        "realized_pnl": 0.00,
-        "unrealized_pnl": 0.00,
         "trend_holdings": 0.0,
         "trend_cost_basis": 0.0,
         "trend_realized_pnl": 0.0,
@@ -278,16 +241,15 @@ state = {
     "last_history_update": 0,
     "last_5m_update": 0,
     "last_volume_update": 0,
-    "current_volume_tick": 0.0,         # Accumulating volume within current candle
+    "current_volume_tick": 0.0,
     "current_volume_5m_tick": 0.0,
-    "tick_count": 0,                     # Ticks in current 1m candle
-    "tick_count_5m": 0,                  # Ticks in current 5m candle
-    "tick_history": [],                  # Rolling history of ticks per 1m candle (last 20)
-    "tick_history_5m": [],               # Rolling history of ticks per 5m candle (last 20)
-    "price_chart": [],                   # 1m candle closes for charting [{time, price}] — up to 10080 (1 week)
-    "equity_history": [],                # Portfolio value over time [{time, value, pnl}]
-    "trade_markers": [],                 # Recent trades for chart overlay [{time, action, price}]
-    "live_orders": {},                   # {level_idx: coinbase_order_id} for live mode tracking
+    "tick_count": 0,
+    "tick_count_5m": 0,
+    "tick_history": [],
+    "tick_history_5m": [],
+    "price_chart": [],
+    "equity_history": [],
+    "trade_markers": [],
     "daily_loss_tracker": {
         "date": "",
         "start_value": 0.0,
@@ -301,24 +263,20 @@ def load_state():
         try:
             with open(STATE_FILE, 'r') as f:
                 saved_data = json.load(f)
-                state["portfolio"].update(saved_data.get("portfolio", {}))
-                # Migrate old portfolios to new split cash system
-                if "grid_cash" not in saved_data.get("portfolio", {}):
-                    old_cash = state["portfolio"].get("cash", 1000.0)
-                    state["portfolio"]["grid_cash"] = round(old_cash / 2, 2)
-                    state["portfolio"]["trend_cash"] = round(old_cash / 2, 2)
-                    state["portfolio"]["initial_balance"] = 1000.0
-                    state["portfolio"]["cash"] = 1000.0
-                if "trend_holdings" not in state["portfolio"]:
-                    state["portfolio"]["trend_holdings"] = 0.0
-                    state["portfolio"]["trend_realized_pnl"] = 0.0
-                    state["portfolio"]["trend_unrealized_pnl"] = 0.0
+                pf = saved_data.get("portfolio", {})
+                # Migrate old split-cash portfolios
+                if "trend_holdings" not in pf and "trend_cash" in pf:
+                    pf["cash"] = pf.get("trend_cash", 500.0) + pf.get("grid_cash", 500.0)
+                state["portfolio"].update(pf)
+                # Remove legacy keys
+                for legacy in ("grid_cash", "trend_cash", "holdings", "cost_basis", "unrealized_pnl", "realized_pnl"):
+                    state["portfolio"].pop(legacy, None)
+
                 saved_settings = saved_data.get("settings", {})
                 for k, v in saved_settings.items():
                     if k in state["settings"]:
                         state["settings"][k] = v
                 state["stats"].update(saved_data.get("stats", {}))
-                state["grid_state"].update(saved_data.get("grid_state", {}))
                 saved_trend = saved_data.get("trend_state", {})
                 for k, v in saved_trend.items():
                     state["trend_state"][k] = v
@@ -328,13 +286,11 @@ def load_state():
 
 def save_state():
     try:
-        serializable_grid = {k: v for k, v in state["grid_state"].items()}
         with open(STATE_FILE, 'w') as f:
             json.dump({
                 "portfolio": state["portfolio"],
                 "settings": state["settings"],
                 "stats": state["stats"],
-                "grid_state": serializable_grid,
                 "trend_state": state["trend_state"],
             }, f, indent=4)
     except Exception as e:
@@ -365,6 +321,7 @@ class ConnectionManager:
 
 
 def get_broadcast_payload():
+    ts = state["trend_state"]
     return {
         "prices": state["prices"],
         "portfolio": state["portfolio"],
@@ -373,29 +330,14 @@ def get_broadcast_payload():
         "logs": state["logs"],
         "settings": state["settings"],
         "stats": state["stats"],
-        "grid_state": {
-            "initialized": state["grid_state"]["initialized"],
-            "current_index": state["grid_state"]["current_index"],
-            "levels_count": len(state["grid_state"]["levels"]),
-            "range_high": state["grid_state"]["range_high"],
-            "range_low": state["grid_state"]["range_low"],
-            "open_positions": len(state["grid_state"]["filled_levels"]),
-        },
         "circuit_breaker": state["circuit_breaker"],
-        "price_chart": state["price_chart"][-10080:],   # up to 1 week of 1m candles
+        "price_chart": state["price_chart"][-10080:],
         "equity_history": state["equity_history"][-10080:],
         "trade_markers": state["trade_markers"][-500:],
         "trend_state": {
-            "signal": state["trend_state"]["signal"],
-            "position": state["trend_state"]["position"],
-            "consecutive_signals": state["trend_state"]["consecutive_signals"],
-        },
-        "trend_portfolio": {
-            "grid_cash": state["portfolio"].get("grid_cash", 500.0),
-            "trend_cash": state["portfolio"].get("trend_cash", 500.0),
-            "trend_holdings": state["portfolio"].get("trend_holdings", 0.0),
-            "trend_realized_pnl": state["portfolio"].get("trend_realized_pnl", 0.0),
-            "trend_unrealized_pnl": state["portfolio"].get("trend_unrealized_pnl", 0.0),
+            "signal": ts["signal"],
+            "consecutive_signals": ts["consecutive_signals"],
+            "position": ts["position"],
         },
     }
 
@@ -455,7 +397,7 @@ def calculate_stoch_rsi(prices, rsi_period=14, stoch_period=14):
 
 
 def calculate_trend(arr_series):
-    """Returns (trend_str, trend_strength) from a price series."""
+    """Returns (trend_str, trend_strength, ema_fast, ema_slow) from a price series."""
     s = pd.Series(arr_series)
     ema_fast = float(s.ewm(span=9, adjust=False).mean().iloc[-1])
     ema_slow = float(s.ewm(span=21, adjust=False).mean().iloc[-1])
@@ -472,7 +414,6 @@ def calculate_trend(arr_series):
 
 
 def calculate_volume_sma(volumes, period=20):
-    """Volume SMA and ratio of current volume to average."""
     if len(volumes) < 2:
         return 0.0, 1.0
     arr = np.array(volumes[-period:], dtype=float)
@@ -483,13 +424,12 @@ def calculate_volume_sma(volumes, period=20):
 
 
 def calculate_all_indicators(prices, volumes=None):
-    """Full indicator suite including volume and multi-timeframe trend."""
     if len(prices) < 30:
         return state["indicators"]["BTC/USD"]
 
     arr = np.array(prices, dtype=float)
 
-    # --- RSI ---
+    # RSI
     delta = np.diff(arr)
     gain = delta.clip(min=0)
     loss = -delta.clip(max=0)
@@ -501,14 +441,14 @@ def calculate_all_indicators(prices, volumes=None):
     else:
         rsi = 50.0
 
-    # --- Bollinger Bands ---
+    # Bollinger Bands
     recent20 = arr[-20:]
     sma20 = float(np.mean(recent20))
     std20 = float(np.std(recent20))
     bb_upper = sma20 + (2.0 * std20)
     bb_lower = sma20 - (2.0 * std20)
 
-    # --- MACD ---
+    # MACD
     s = pd.Series(arr)
     ema12 = s.ewm(span=12, adjust=False).mean()
     ema26 = s.ewm(span=26, adjust=False).mean()
@@ -516,29 +456,28 @@ def calculate_all_indicators(prices, volumes=None):
     macd_signal = macd_line.ewm(span=9, adjust=False).mean()
     macd_histogram = macd_line - macd_signal
 
-    # --- 1m Trend ---
+    # 1m Trend
     trend_1m, strength_1m, ema_fast, ema_slow = calculate_trend(arr)
 
-    # --- 5m Trend (multi-timeframe) ---
+    # 5m Trend
     prices_5m = state["history_5m"].get("BTC/USD", [])
     if len(prices_5m) >= 10:
         trend_5m, strength_5m, _, _ = calculate_trend(np.array(prices_5m, dtype=float))
     else:
         trend_5m, strength_5m = "NEUTRAL", 0.0
 
-    # Multi-timeframe agreement
     mtf_agreement = (trend_1m == trend_5m) and trend_1m != "NEUTRAL"
 
-    # --- ATR ---
+    # ATR
     atr = calculate_atr(arr)
 
-    # --- Volatility ---
+    # Volatility
     volatility = float(np.mean(np.abs(np.diff(arr[-15:])))) if len(arr) >= 15 else 0.0
 
-    # --- Stochastic RSI ---
+    # Stochastic RSI
     stoch_rsi = calculate_stoch_rsi(arr)
 
-    # --- Volume ---
+    # Volume
     vol_sma, vol_ratio = 0.0, 1.0
     if volumes and len(volumes) >= 2:
         vol_sma, vol_ratio = calculate_volume_sma(volumes)
@@ -564,137 +503,6 @@ def calculate_all_indicators(prices, volumes=None):
         "volume_ratio": float(vol_ratio),
         "stoch_rsi": float(stoch_rsi),
     }
-
-# --- ADAPTIVE GRID ENGINE ---
-
-def compute_dynamic_grid_range(current_price, atr):
-    multiplier = state["settings"]["atr_multiplier"]
-    half_range = atr * multiplier
-    min_range = current_price * 0.01
-    half_range = max(half_range, min_range)
-    return current_price - half_range, current_price + half_range
-
-
-def initialize_grid(current_price):
-    settings = state["settings"]
-    atr = state["indicators"]["BTC/USD"].get("atr", 0)
-
-    if settings["auto_range"] and atr > 0:
-        lower, upper = compute_dynamic_grid_range(current_price, atr)
-    else:
-        upper = settings["grid_upper"] if settings["grid_upper"] > 0 else current_price * 1.03
-        lower = settings["grid_lower"] if settings["grid_lower"] > 0 else current_price * 0.97
-
-    if upper <= lower:
-        upper = current_price * 1.03
-        lower = current_price * 0.97
-
-    levels_count = settings["grid_levels"]
-    grid_array = np.linspace(lower, upper, levels_count).tolist()
-    state["grid_state"]["levels"] = grid_array
-    state["grid_state"]["range_high"] = upper
-    state["grid_state"]["range_low"] = lower
-
-    closest_idx = min(range(len(grid_array)), key=lambda i: abs(grid_array[i] - current_price))
-    state["grid_state"]["current_index"] = closest_idx
-    state["grid_state"]["initialized"] = True
-    state["grid_state"]["last_rebalance"] = time.time()
-
-    step_size = grid_array[1] - grid_array[0] if len(grid_array) > 1 else 0
-    logger.info(f"🕸️ Grid Active: {levels_count} levels from ${lower:.2f}-${upper:.2f}. Step: ${step_size:.2f}")
-
-
-def should_rebalance_grid(current_price):
-    gs = state["grid_state"]
-    if not gs["initialized"] or not state["settings"]["auto_range"]:
-        return False
-
-    now = time.time()
-    interval = state["settings"]["rebalance_interval"]
-    if now - gs["last_rebalance"] < interval:
-        return False
-
-    grid_range = gs["range_high"] - gs["range_low"]
-    if grid_range <= 0:
-        return True
-    position_in_range = (current_price - gs["range_low"]) / grid_range
-
-    return position_in_range < 0.15 or position_in_range > 0.85
-
-
-def get_trade_size(current_price):
-    base_size = state["settings"]["trade_size_usd"]
-    if not state["settings"]["volatility_scaling"]:
-        return base_size
-
-    ind = state["indicators"]["BTC/USD"]
-    bb_upper = ind.get("bb_upper", 0)
-    bb_lower = ind.get("bb_lower", 0)
-    bb_mid = ind.get("bb_mid", 0)
-
-    if bb_upper <= bb_lower or bb_mid == 0:
-        return base_size
-
-    bb_range = bb_upper - bb_lower
-    distance_from_mid = abs(current_price - bb_mid)
-    bb_position = distance_from_mid / (bb_range / 2) if bb_range > 0 else 0
-    scale_factor = 1.0 + min(bb_position, 1.0)
-
-    atr = ind.get("atr", 0)
-    if atr > 0 and bb_mid > 0:
-        vol_ratio = atr / bb_mid * 1000
-        vol_scale = min(1.0 + vol_ratio * 0.5, 1.5)
-        scale_factor *= vol_scale
-
-    scaled_size = base_size * scale_factor
-    return min(scaled_size, state["settings"]["max_trade_size_usd"])
-
-
-def check_cooldown(level_idx):
-    last_time = state["grid_state"]["last_trade_time"].get(str(level_idx), 0)
-    return (time.time() - last_time) >= state["settings"]["cooldown_seconds"]
-
-
-def check_trend_filter(action):
-    """
-    Grid-aware trend filter:
-    - Grid bots PROFIT by selling into strength and buying into weakness.
-    - Only block in extreme scenarios (clear capitulation/falling knife).
-    - MTF agreement = grid is working as intended, allow all trades freely.
-    - Volume filter uses real tick-based volume ratio.
-    """
-    if not state["settings"]["trend_filter"]:
-        return True
-
-    ind = state["indicators"]["BTC/USD"]
-    trend_1m = ind.get("trend", "NEUTRAL")
-    trend_5m = ind.get("trend_5m", "NEUTRAL")
-    stoch_rsi = ind.get("stoch_rsi", 50)
-    mtf_agreement = ind.get("mtf_agreement", False)
-    volume_ratio = ind.get("volume_ratio", 1.0)
-
-    # Volume filter: only apply when we have enough tick history (real data)
-    if state["settings"].get("volume_filter", True):
-        if len(state.get("tick_history", [])) >= 5 and volume_ratio < 0.6:
-            return False
-
-    # MTF agreement: grid is working as intended — allow all trades freely
-    if state["settings"].get("mtf_trend_filter", True) and mtf_agreement:
-        return True
-
-    if action == "BUY":
-        # Only block clear falling knife: BOTH TFs bearish AND not yet oversold
-        if trend_1m == "BEARISH" and trend_5m == "BEARISH" and stoch_rsi > 60:
-            return False
-        return True
-
-    elif action == "SELL":
-        # Only block in extreme capitulation dump (price in freefall, don't sell into hole)
-        if trend_1m == "BEARISH" and trend_5m == "BEARISH" and stoch_rsi < 20:
-            return False
-        return True
-
-    return True
 
 
 def check_circuit_breaker():
@@ -741,288 +549,23 @@ def update_stats(action, pnl, trade_usd):
         if pnl > 0:
             stats["winning_trades"] += 1
             stats["largest_win"] = max(stats["largest_win"], pnl)
-            # Rolling avg win
             n = stats["winning_trades"]
             stats["avg_win"] = round(((stats["avg_win"] * (n - 1)) + pnl) / n, 4)
         else:
             stats["losing_trades"] += 1
             stats["largest_loss"] = min(stats["largest_loss"], pnl)
-            # Rolling avg loss
             n = stats["losing_trades"]
             stats["avg_loss"] = round(((stats["avg_loss"] * (n - 1)) + pnl) / n, 4)
 
     total = stats["winning_trades"] + stats["losing_trades"]
     stats["win_rate"] = round((stats["winning_trades"] / total * 100) if total > 0 else 0, 1)
 
-    # Profit factor = gross wins / gross losses
     gross_wins = stats["avg_win"] * stats["winning_trades"] if stats["winning_trades"] > 0 else 0
     gross_losses = abs(stats["avg_loss"]) * stats["losing_trades"] if stats["losing_trades"] > 0 else 0
     stats["profit_factor"] = round(gross_wins / gross_losses, 2) if gross_losses > 0 else (float("inf") if gross_wins > 0 else 0.0)
 
     if state["portfolio"]["total_value"] > stats["peak_value"]:
         stats["peak_value"] = round(state["portfolio"]["total_value"], 2)
-
-
-async def execute_trade(symbol, action, current_price, trade_usd_amount, level_idx=None):
-    # ── Live Trading Mode ─────────────────────────────────────────────────────
-    if state["settings"].get("live_trading"):
-        if check_daily_loss_limit():
-            await log_event("🛑 Daily loss limit reached — trade blocked.")
-            return False
-        try:
-            if action == "BUY":
-                order = await cb_place_order("BUY", quote_size=trade_usd_amount)
-                order_id = order.get("order_id", "unknown")
-                # Get actual fill from Coinbase account
-                await asyncio.sleep(1.5)  # let order settle
-                accounts = await cb_get_account()
-                btc_bal = accounts["BTC"]
-                usd_bal = accounts["USD"]
-                exec_price = current_price  # approximate; real fill in order details
-                qty = round(trade_usd_amount / exec_price, 8)
-                fee = calculate_fees(trade_usd_amount)
-
-                state["portfolio"]["cash"] = round(usd_bal, 2)
-                state["portfolio"]["holdings"][symbol] = round(btc_bal, 8)
-                state["portfolio"]["total_fees"] = round(state["portfolio"]["total_fees"] + fee, 4)
-                if level_idx is not None:
-                    state["grid_state"]["filled_levels"][str(level_idx)] = {
-                        "qty": qty, "entry_price": exec_price,
-                        "cost": trade_usd_amount, "time": time.time(),
-                    }
-                    state["grid_state"]["last_trade_time"][str(level_idx)] = time.time()
-                    state["live_orders"][str(level_idx)] = order_id
-
-                update_stats("BUY", 0, trade_usd_amount)
-                await log_event(f"🟢 LIVE BUY ${trade_usd_amount:.2f} @ ~${exec_price:.2f} | Order: {order_id[:8]}… [Grid #{level_idx}]")
-                state["trade_markers"].append({"time": datetime.now().strftime("%m/%d %H:%M"), "action": "BUY", "price": round(exec_price, 2)})
-                if len(state["trade_markers"]) > 500: state["trade_markers"].pop(0)
-                return True
-
-            elif action == "SELL":
-                fill_key = str(level_idx) if level_idx is not None else None
-                fill = state["grid_state"]["filled_levels"].get(fill_key) if fill_key else None
-                qty_to_sell = fill["qty"] if fill else round(trade_usd_amount / current_price, 8)
-                entry_cost = fill["cost"] if fill else trade_usd_amount
-
-                order = await cb_place_order("SELL", base_size=qty_to_sell)
-                order_id = order.get("order_id", "unknown")
-                await asyncio.sleep(1.5)
-                accounts = await cb_get_account()
-                usd_bal = accounts["USD"]
-                btc_bal = accounts["BTC"]
-                exec_price = current_price
-                sale_value = round(qty_to_sell * exec_price, 2)
-                fee = calculate_fees(sale_value)
-                pnl = round(sale_value - fee - entry_cost, 2)
-
-                state["portfolio"]["cash"] = round(usd_bal, 2)
-                state["portfolio"]["holdings"][symbol] = round(btc_bal, 8)
-                state["portfolio"]["total_fees"] = round(state["portfolio"]["total_fees"] + fee, 4)
-                state["portfolio"]["realized_pnl"] = round(state["portfolio"]["realized_pnl"] + pnl, 2)
-                if fill_key and fill_key in state["grid_state"]["filled_levels"]:
-                    del state["grid_state"]["filled_levels"][fill_key]
-                if fill_key and fill_key in state["live_orders"]:
-                    del state["live_orders"][fill_key]
-                if level_idx is not None:
-                    state["grid_state"]["last_trade_time"][str(level_idx)] = time.time()
-
-                update_stats("SELL", pnl, sale_value)
-                pnl_emoji = "✅" if pnl >= 0 else "❌"
-                await log_event(f"🔴 LIVE SELL ${sale_value:.2f} @ ~${exec_price:.2f} P&L: {pnl_emoji}${pnl:.2f} | Order: {order_id[:8]}… [Grid #{level_idx}]")
-                state["trade_markers"].append({"time": datetime.now().strftime("%m/%d %H:%M"), "action": "SELL", "price": round(exec_price, 2)})
-                if len(state["trade_markers"]) > 500: state["trade_markers"].pop(0)
-                return True
-
-        except Exception as e:
-            await log_event(f"❌ LIVE ORDER FAILED: {e}")
-            return False
-
-    # ── Paper Trading Mode ────────────────────────────────────────────────────
-    slippage = current_price * state["settings"]["slippage_rate"]
-    exec_price = current_price + slippage if action == "BUY" else current_price - slippage
-
-    pnl = 0.0
-
-    if action == "BUY":
-        if state["portfolio"]["grid_cash"] < trade_usd_amount:
-            return False
-        if len(state["grid_state"]["filled_levels"]) >= state["settings"]["max_open_positions"]:
-            return False
-
-        fee = calculate_fees(trade_usd_amount)
-        qty = round(float((trade_usd_amount - fee) / exec_price), 8)
-
-        state["portfolio"]["grid_cash"] = round(state["portfolio"].get("grid_cash", 500.0) - trade_usd_amount, 2)
-        state["portfolio"]["cash"] = round(state["portfolio"]["grid_cash"] + state["portfolio"].get("trend_cash", 500.0), 2)
-        state["portfolio"]["total_fees"] = round(state["portfolio"]["total_fees"] + fee, 4)
-        state["portfolio"]["holdings"][symbol] = round(state["portfolio"]["holdings"][symbol] + qty, 8)
-
-        old_qty = state["portfolio"]["holdings"][symbol] - qty
-        old_cost = old_qty * state["portfolio"]["cost_basis"].get(symbol, 0)
-        new_cost = qty * exec_price
-        total_qty = state["portfolio"]["holdings"][symbol]
-        if total_qty > 0:
-            state["portfolio"]["cost_basis"][symbol] = round((old_cost + new_cost) / total_qty, 2)
-
-        if level_idx is not None:
-            state["grid_state"]["filled_levels"][str(level_idx)] = {
-                "qty": qty,
-                "entry_price": exec_price,
-                "cost": trade_usd_amount,
-                "time": time.time(),
-            }
-            state["grid_state"]["last_trade_time"][str(level_idx)] = time.time()
-
-        update_stats("BUY", 0, trade_usd_amount)
-        await log_event(f"💰 BUY ${trade_usd_amount:.2f} @ ${exec_price:.2f} (Fee: ${fee:.4f}) [Grid #{level_idx}]")
-        await tg_notify(f"💰 <b>BUY</b> ${trade_usd_amount:.2f} @ ${exec_price:.2f}\nGrid #{level_idx} | Fee: ${fee:.4f}\nCash left: ${state['portfolio']['cash']:.2f}")
-        state["trade_markers"].append({"time": datetime.now().strftime("%m/%d %H:%M"), "action": "BUY", "price": round(exec_price, 2)})
-        if len(state["trade_markers"]) > 500: state["trade_markers"].pop(0)
-        return True
-
-    elif action == "SELL":
-        fill = None
-        fill_key = None
-        if level_idx is not None:
-            fill_key = str(level_idx)
-            fill = state["grid_state"]["filled_levels"].get(fill_key)
-
-        if fill:
-            qty_to_sell = fill["qty"]
-            entry_cost = fill["cost"]
-        else:
-            qty_to_sell = round(float(trade_usd_amount / exec_price), 8)
-            entry_cost = trade_usd_amount
-
-        if state["portfolio"]["holdings"][symbol] < qty_to_sell:
-            return False
-
-        sale_value = round(float(qty_to_sell * exec_price), 2)
-        fee = calculate_fees(sale_value)
-        net_sale = sale_value - fee
-        pnl = round(net_sale - entry_cost, 2)
-
-        state["portfolio"]["grid_cash"] = round(state["portfolio"].get("grid_cash", 500.0) + net_sale, 2)
-        state["portfolio"]["cash"] = round(state["portfolio"]["grid_cash"] + state["portfolio"].get("trend_cash", 500.0), 2)
-        state["portfolio"]["total_fees"] = round(state["portfolio"]["total_fees"] + fee, 4)
-        state["portfolio"]["holdings"][symbol] = round(state["portfolio"]["holdings"][symbol] - qty_to_sell, 8)
-        state["portfolio"]["realized_pnl"] = round(state["portfolio"]["realized_pnl"] + pnl, 2)
-
-        if state["portfolio"]["holdings"][symbol] <= 1e-8:
-            state["portfolio"]["holdings"][symbol] = 0.0
-            state["portfolio"]["cost_basis"][symbol] = 0.0
-
-        if fill_key and fill_key in state["grid_state"]["filled_levels"]:
-            del state["grid_state"]["filled_levels"][fill_key]
-
-        if level_idx is not None:
-            state["grid_state"]["last_trade_time"][str(level_idx)] = time.time()
-
-        update_stats("SELL", pnl, sale_value)
-        pnl_emoji = "✅" if pnl >= 0 else "❌"
-        await log_event(f"🤝 SELL ${sale_value:.2f} @ ${exec_price:.2f} (Fee: ${fee:.4f}) P&L: {pnl_emoji}${pnl:.2f} [Grid #{level_idx}]")
-        await tg_notify(f"🤝 <b>SELL</b> ${sale_value:.2f} @ ${exec_price:.2f}\nP&L: {pnl_emoji} ${pnl:.2f} | Fee: ${fee:.4f}\nGrid #{level_idx} | Total P&L: ${state['portfolio']['realized_pnl']:.2f}")
-        state["trade_markers"].append({"time": datetime.now().strftime("%m/%d %H:%M"), "action": "SELL", "price": round(exec_price, 2)})
-        if len(state["trade_markers"]) > 500: state["trade_markers"].pop(0)
-        return True
-
-    return False
-
-
-async def evaluate_grid(symbol, price):
-    if check_circuit_breaker():
-        return
-
-    gs = state["grid_state"]
-
-    if not gs["initialized"]:
-        initialize_grid(price)
-        await log_event(f"🕸️ Grid initialized: ${gs['range_low']:.0f} - ${gs['range_high']:.0f} ({len(gs['levels'])} levels)")
-        return
-
-    if should_rebalance_grid(price):
-        initialize_grid(price)
-        await log_event(f"🔄 Grid rebalanced around ${price:.0f}: ${gs['range_low']:.0f} - ${gs['range_high']:.0f}")
-        return
-
-    levels = gs["levels"]
-    curr_idx = gs["current_index"]
-
-    if not levels or curr_idx < 0 or curr_idx >= len(levels):
-        initialize_grid(price)
-        return
-
-    trade_size = get_trade_size(price)
-    trades_this_tick = 0
-    max_trades_per_tick = 3
-
-    # --- Price moved UP: SELL signals ---
-    while curr_idx < len(levels) - 1 and trades_this_tick < max_trades_per_tick:
-        level_above = levels[curr_idx + 1]
-        if price < level_above:
-            break
-
-        next_idx = curr_idx + 1
-        sell_level = None
-        for filled_idx_str in list(state["grid_state"]["filled_levels"].keys()):
-            filled_idx = int(filled_idx_str)
-            if filled_idx <= curr_idx:
-                sell_level = filled_idx
-                break
-
-        if sell_level is not None:
-            if check_cooldown(next_idx) and check_trend_filter("SELL"):
-                success = await execute_trade(symbol, "SELL", price, trade_size, level_idx=sell_level)
-                if success:
-                    trades_this_tick += 1
-
-        state["grid_state"]["current_index"] = next_idx
-        curr_idx = next_idx
-
-    # --- Price moved DOWN: BUY signals ---
-    curr_idx = state["grid_state"]["current_index"]
-    while curr_idx > 0 and trades_this_tick < max_trades_per_tick:
-        level_below = levels[curr_idx - 1]
-        if price > level_below:
-            break
-
-        next_idx = curr_idx - 1
-        if str(next_idx) not in state["grid_state"]["filled_levels"]:
-            if check_cooldown(next_idx) and check_trend_filter("BUY"):
-                if state["portfolio"].get("grid_cash", 500.0) >= trade_size:
-                    success = await execute_trade(symbol, "BUY", price, trade_size, level_idx=next_idx)
-                    if success:
-                        trades_this_tick += 1
-
-        state["grid_state"]["current_index"] = next_idx
-        curr_idx = next_idx
-
-    # --- Trailing Take-Profit scan ---
-    if state["settings"].get("trailing_take_profit", True):
-        tp_pct = state["settings"].get("trailing_tp_pct", 1.5) / 100.0
-        lock_pct = state["settings"].get("profit_lock_pct", 0.5) / 100.0
-
-        for level_key in list(gs["filled_levels"].keys()):
-            fill = gs["filled_levels"].get(level_key)
-            if not fill:
-                continue
-            entry = fill.get("entry_price", 0)
-            if entry <= 0:
-                continue
-
-            if not fill.get("trailing_active", False):
-                if price >= entry * (1.0 + tp_pct):
-                    fill["trailing_active"] = True
-                    fill["trail_high"] = price
-                    await log_event(f"🎯 Trailing TP activated for Grid #{level_key} @ ${price:.2f} (entry ${entry:.2f})")
-            else:
-                if price > fill.get("trail_high", 0):
-                    fill["trail_high"] = price
-                trail_high = fill.get("trail_high", price)
-                if price <= trail_high * (1.0 - lock_pct):
-                    await log_event(f"🔒 Trailing TP triggered for Grid #{level_key} @ ${price:.2f} (high ${trail_high:.2f})")
-                    await execute_trade(symbol, "SELL", price, get_trade_size(price), level_idx=int(level_key))
 
 
 # ── Trend Trading Engine ──────────────────────────────────────────────────────
@@ -1057,9 +600,13 @@ def get_trend_signal():
 
 
 async def evaluate_trend(symbol, price):
+    if check_circuit_breaker():
+        return
+
     ts = state["trend_state"]
     settings = state["settings"]
     portfolio = state["portfolio"]
+    live = settings.get("live_trading", False)
 
     signal = get_trend_signal()
     ts["signal"] = signal
@@ -1090,16 +637,45 @@ async def evaluate_trend(symbol, price):
         if exit_reason:
             qty = position["qty"]
             cost = position["cost"]
+
+            if live:
+                if check_daily_loss_limit():
+                    await log_event("🛑 Daily loss limit — SELL blocked.")
+                    return
+                try:
+                    order = await cb_place_order("SELL", base_size=qty)
+                    order_id = order.get("order_id", "unknown")
+                    await asyncio.sleep(1.5)
+                    accounts = await cb_get_account()
+                    portfolio["cash"] = round(accounts["USD"], 2)
+                    portfolio["trend_holdings"] = round(accounts["BTC"], 8)
+                    fee = calculate_fees(qty * price)
+                    sale_value = round(qty * price - fee, 2)
+                    pnl = round(sale_value - cost, 2)
+                    portfolio["total_fees"] = round(portfolio["total_fees"] + fee, 4)
+                    portfolio["trend_realized_pnl"] = round(portfolio.get("trend_realized_pnl", 0.0) + pnl, 2)
+                    portfolio["trend_unrealized_pnl"] = 0.0
+                    ts["position"] = None
+                    ts["last_trade_time"] = now
+                    pnl_emoji = "✅" if pnl >= 0 else "❌"
+                    await log_event(f"📉 LIVE TREND EXIT ({exit_reason}) @ ${price:.2f} | P&L: {pnl_emoji}${pnl:.2f} | Order: {order_id[:8]}…")
+                    await tg_notify(f"📉 <b>LIVE TREND EXIT</b> ({exit_reason})\n@ ${price:.2f} | P&L: {pnl_emoji} ${pnl:.2f}\nTotal Trend P&L: ${portfolio['trend_realized_pnl']:.2f}")
+                    update_stats("SELL", pnl, qty * price)
+                    state["trade_markers"].append({"time": datetime.now().strftime("%m/%d %H:%M"), "action": "SELL", "price": round(price, 2)})
+                except Exception as e:
+                    await log_event(f"❌ LIVE SELL FAILED: {e}")
+                return
+
+            # Paper exit
             fee = round(qty * price * settings["fee_rate"], 4)
             sale_value = round(qty * price - fee, 2)
             pnl = round(sale_value - cost, 2)
 
-            portfolio["trend_cash"] = round(portfolio.get("trend_cash", 500.0) + sale_value, 2)
+            portfolio["cash"] = round(portfolio["cash"] + sale_value, 2)
             portfolio["trend_holdings"] = round(max(0.0, portfolio.get("trend_holdings", 0.0) - qty), 8)
             portfolio["trend_realized_pnl"] = round(portfolio.get("trend_realized_pnl", 0.0) + pnl, 2)
             portfolio["total_fees"] = round(portfolio["total_fees"] + fee, 4)
             portfolio["trend_unrealized_pnl"] = 0.0
-            portfolio["cash"] = round(portfolio.get("grid_cash", 500.0) + portfolio["trend_cash"], 2)
 
             ts["position"] = None
             ts["last_trade_time"] = now
@@ -1107,6 +683,8 @@ async def evaluate_trend(symbol, price):
             pnl_emoji = "✅" if pnl >= 0 else "❌"
             await log_event(f"📉 TREND EXIT ({exit_reason}) @ ${price:.2f} | P&L: {pnl_emoji}${pnl:.2f} | Total Trend P&L: ${portfolio['trend_realized_pnl']:.2f}")
             await tg_notify(f"📉 <b>TREND EXIT</b> ({exit_reason})\n@ ${price:.2f} | P&L: {pnl_emoji} ${pnl:.2f}\nTotal Trend P&L: ${portfolio['trend_realized_pnl']:.2f}")
+            update_stats("SELL", pnl, qty * price)
+            state["trade_markers"].append({"time": datetime.now().strftime("%m/%d %H:%M"), "action": "SELL", "price": round(price, 2)})
             return
 
     # Entry logic
@@ -1120,35 +698,63 @@ async def evaluate_trend(symbol, price):
             return
 
         trade_usd = settings["trend_allocation_usd"] * settings["trend_position_size_pct"]
-        trend_cash = portfolio.get("trend_cash", 500.0)
-        trade_usd = min(trade_usd, trend_cash)
+        trade_usd = min(trade_usd, portfolio["cash"])
         if trade_usd < 10:
             return
 
+        if live:
+            if check_daily_loss_limit():
+                await log_event("🛑 Daily loss limit — BUY blocked.")
+                return
+            try:
+                order = await cb_place_order("BUY", quote_size=trade_usd)
+                order_id = order.get("order_id", "unknown")
+                await asyncio.sleep(1.5)
+                accounts = await cb_get_account()
+                portfolio["cash"] = round(accounts["USD"], 2)
+                portfolio["trend_holdings"] = round(accounts["BTC"], 8)
+                fee = calculate_fees(trade_usd)
+                qty = round((trade_usd - fee) / price, 8)
+                portfolio["total_fees"] = round(portfolio["total_fees"] + fee, 4)
+                stop_loss = round(price * (1 - settings["trend_stop_loss_pct"] / 100), 2)
+                take_profit = round(price * (1 + settings["trend_take_profit_pct"] / 100), 2)
+                ts["position"] = {
+                    "entry_price": price, "qty": qty, "cost": trade_usd,
+                    "stop_loss": stop_loss, "take_profit": take_profit,
+                    "entry_time": now, "high_water_mark": price,
+                }
+                ts["last_trade_time"] = now
+                ts["consecutive_signals"] = 0
+                await log_event(f"📈 LIVE TREND BUY ${trade_usd:.2f} @ ${price:.2f} | SL: ${stop_loss:.2f} | TP: ${take_profit:.2f} | Order: {order_id[:8]}…")
+                await tg_notify(f"📈 <b>LIVE TREND BUY</b> ${trade_usd:.2f} @ ${price:.2f}\nSL: ${stop_loss:.2f} | TP: ${take_profit:.2f}")
+                update_stats("BUY", 0, trade_usd)
+                state["trade_markers"].append({"time": datetime.now().strftime("%m/%d %H:%M"), "action": "BUY", "price": round(price, 2)})
+            except Exception as e:
+                await log_event(f"❌ LIVE BUY FAILED: {e}")
+            return
+
+        # Paper entry
         fee = round(trade_usd * settings["fee_rate"], 4)
         qty = round((trade_usd - fee) / price, 8)
         stop_loss = round(price * (1 - settings["trend_stop_loss_pct"] / 100), 2)
         take_profit = round(price * (1 + settings["trend_take_profit_pct"] / 100), 2)
 
-        portfolio["trend_cash"] = round(trend_cash - trade_usd, 2)
+        portfolio["cash"] = round(portfolio["cash"] - trade_usd, 2)
         portfolio["trend_holdings"] = round(portfolio.get("trend_holdings", 0.0) + qty, 8)
         portfolio["total_fees"] = round(portfolio["total_fees"] + fee, 4)
-        portfolio["cash"] = round(portfolio.get("grid_cash", 500.0) + portfolio["trend_cash"], 2)
 
         ts["position"] = {
-            "entry_price": price,
-            "qty": qty,
-            "cost": trade_usd,
-            "stop_loss": stop_loss,
-            "take_profit": take_profit,
-            "entry_time": now,
-            "high_water_mark": price,
+            "entry_price": price, "qty": qty, "cost": trade_usd,
+            "stop_loss": stop_loss, "take_profit": take_profit,
+            "entry_time": now, "high_water_mark": price,
         }
         ts["last_trade_time"] = now
         ts["consecutive_signals"] = 0
 
         await log_event(f"📈 TREND BUY ${trade_usd:.2f} @ ${price:.2f} | SL: ${stop_loss:.2f} | TP: ${take_profit:.2f}")
         await tg_notify(f"📈 <b>TREND BUY</b> ${trade_usd:.2f} @ ${price:.2f}\nSL: ${stop_loss:.2f} | TP: ${take_profit:.2f}")
+        update_stats("BUY", 0, trade_usd)
+        state["trade_markers"].append({"time": datetime.now().strftime("%m/%d %H:%M"), "action": "BUY", "price": round(price, 2)})
     else:
         if signal != "LONG":
             ts["consecutive_signals"] = 0
@@ -1161,11 +767,9 @@ async def process_price_update(symbol, price, volume=0.0):
 
     now = time.time()
 
-    # Accumulate volume within candle period
     state["current_volume_tick"] = state.get("current_volume_tick", 0.0) + volume
     state["current_volume_5m_tick"] = state.get("current_volume_5m_tick", 0.0) + volume
 
-    # Tick counters — real activity proxy (count WebSocket price updates per candle)
     state["tick_count"] = state.get("tick_count", 0) + 1
     state["tick_count_5m"] = state.get("tick_count_5m", 0) + 1
 
@@ -1173,7 +777,6 @@ async def process_price_update(symbol, price, volume=0.0):
     if now - state.get("last_history_update", 0) >= 60:
         state["history"][symbol].append(price)
         state["volume_history"][symbol].append(state["current_volume_tick"])
-        # Save tick count for this completed candle
         state["tick_history"].append(state["tick_count"])
         if len(state["tick_history"]) > 20:
             state["tick_history"].pop(0)
@@ -1204,7 +807,7 @@ async def process_price_update(symbol, price, volume=0.0):
         if len(state["history_5m"][symbol]) > 0:
             state["history_5m"][symbol][-1] = price
 
-    # Compute real tick-based volume ratio
+    # Tick-based volume ratio
     tick_hist = state.get("tick_history", [])
     if len(tick_hist) >= 3:
         avg_ticks = float(np.mean(tick_hist[-20:]))
@@ -1213,7 +816,6 @@ async def process_price_update(symbol, price, volume=0.0):
     else:
         tick_vol_ratio = 1.0
 
-    # Track whether a new candle just closed this tick
     candle_closed = (now - state.get("last_history_update", 0)) < 2.0 and len(state["history"][symbol]) > 0
 
     # Recalculate indicators
@@ -1221,10 +823,8 @@ async def process_price_update(symbol, price, volume=0.0):
         state["history"][symbol],
         volumes=state["volume_history"][symbol]
     )
-    # Override volume_ratio with real tick-based value
     state["indicators"][symbol]["volume_ratio"] = round(tick_vol_ratio, 3)
 
-    # Update price chart and equity history on candle close only
     if candle_closed:
         ts_str = datetime.now().strftime("%m/%d %H:%M")
         state["price_chart"].append({"time": ts_str, "price": round(price, 2)})
@@ -1239,30 +839,16 @@ async def process_price_update(symbol, price, volume=0.0):
         if len(state["equity_history"]) > 10080:
             state["equity_history"].pop(0)
 
-        # Periodic save (every candle close, ~60s)
         save_state()
 
     # Portfolio value tracking
-    h_val = round(float(state["portfolio"]["holdings"][symbol] * price), 2)
     trend_h_val = round(float(state["portfolio"].get("trend_holdings", 0.0) * price), 2)
-    state["portfolio"]["grid_cash"] = state["portfolio"].get("grid_cash", 500.0)
-    state["portfolio"]["trend_cash"] = state["portfolio"].get("trend_cash", 500.0)
-    state["portfolio"]["cash"] = round(state["portfolio"]["grid_cash"] + state["portfolio"]["trend_cash"], 2)
-    state["portfolio"]["total_value"] = round(float(state["portfolio"]["cash"] + h_val + trend_h_val), 2)
+    state["portfolio"]["total_value"] = round(float(state["portfolio"]["cash"] + trend_h_val), 2)
     state["portfolio"]["total_profit"] = round(float(state["portfolio"]["total_value"] - state["portfolio"]["initial_balance"]), 2)
-
-    # Unrealized P&L
-    cost_basis = state["portfolio"]["cost_basis"].get(symbol, 0)
-    if state["portfolio"]["holdings"][symbol] > 0 and cost_basis > 0:
-        unrealized = (price - cost_basis) * state["portfolio"]["holdings"][symbol]
-        state["portfolio"]["unrealized_pnl"] = round(unrealized, 2)
-    else:
-        state["portfolio"]["unrealized_pnl"] = 0.0
 
     if state["portfolio"]["total_value"] > state["stats"].get("peak_value", 0):
         state["stats"]["peak_value"] = round(state["portfolio"]["total_value"], 2)
 
-    await evaluate_grid(symbol, price)
     await evaluate_trend(symbol, price)
     await manager.broadcast_state()
 
@@ -1279,7 +865,6 @@ async def warmup_indicators(internal_symbol="BTC/USD"):
             async with session.get(url_1m, headers=headers) as r:
                 if r.status == 200:
                     data = await r.json()
-                    # candle: [time, low, high, open, close, volume]
                     data.reverse()
                     closes = [float(c[4]) for c in data[-100:]]
                     volumes = [float(c[5]) for c in data[-100:]]
@@ -1308,7 +893,6 @@ async def warmup_indicators(internal_symbol="BTC/USD"):
         state["history"][internal_symbol],
         volumes=state["volume_history"][internal_symbol]
     )
-    # Seed price chart from warmup history
     closes = state["history"][internal_symbol]
     now_ts = int(time.time())
     state["price_chart"] = [
@@ -1340,10 +924,6 @@ async def fetch_macro_context(internal_symbol="BTC/USD"):
 
 # --- COINBASE WEBSOCKET STREAM ---
 async def stream_live_crypto():
-    """
-    Connects to Coinbase Advanced Trade WebSocket for real-time tick data.
-    Falls back to REST polling if WebSocket fails.
-    """
     load_state()
     await asyncio.sleep(1)
     await asyncio.gather(fetch_macro_context(), warmup_indicators())
@@ -1363,13 +943,12 @@ async def stream_live_crypto():
                 async with session.ws_connect(ws_url, heartbeat=30) as ws:
                     await ws.send_str(subscribe_msg)
                     await log_event("✅ WebSocket connected to Coinbase. Live tick data active.")
-                    backoff = 2  # reset on successful connect
+                    backoff = 2
 
                     async for msg in ws:
                         if msg.type == aiohttp.WSMsgType.TEXT:
                             try:
                                 data = json.loads(msg.data)
-                                # Coinbase Advanced Trade ticker format
                                 events = data.get("events", [])
                                 for event in events:
                                     tickers = event.get("tickers", [])
@@ -1388,7 +967,6 @@ async def stream_live_crypto():
             logger.error(f"WebSocket error: {e}. Reconnecting in {backoff}s...")
             await log_event(f"⚠️ WS disconnected. Falling back to REST for {backoff}s...")
 
-            # Fallback REST polling during reconnect window
             try:
                 async with aiohttp.ClientSession() as session:
                     for _ in range(backoff):
@@ -1436,35 +1014,22 @@ async def websocket_endpoint(ws: WebSocket):
                         state["portfolio"]["cash"] = round(new_cash, 2)
                         state["portfolio"]["initial_balance"] = round(state["portfolio"]["initial_balance"] + cash_diff, 2)
 
-                    if "trade_size_usd" in payload:
-                        state["settings"]["trade_size_usd"] = float(payload["trade_size_usd"])
-
-                    reinit = False
-                    if "grid_upper" in payload:
-                        state["settings"]["grid_upper"] = float(payload["grid_upper"])
-                        reinit = True
-                    if "grid_lower" in payload:
-                        state["settings"]["grid_lower"] = float(payload["grid_lower"])
-                        reinit = True
-                    if "grid_levels" in payload:
-                        state["settings"]["grid_levels"] = int(payload["grid_levels"])
-                        reinit = True
-
                     # Boolean toggles
-                    for flag in ("volume_filter", "mtf_trend_filter", "trend_filter", "volatility_scaling", "auto_range", "live_trading", "trend_trading"):
-                        if flag in payload:
-                            state["settings"][flag] = bool(payload[flag])
+                    if "live_trading" in payload:
+                        state["settings"]["live_trading"] = bool(payload["live_trading"])
 
-                    # Trend settings
-                    for key in ("trend_stop_loss_pct", "trend_take_profit_pct", "trend_position_size_pct", "trend_min_strength", "trend_allocation_usd", "grid_allocation_usd", "trend_cooldown_seconds"):
+                    # Numeric settings
+                    for key in (
+                        "trend_stop_loss_pct", "trend_take_profit_pct",
+                        "trend_position_size_pct", "trend_min_strength",
+                        "trend_allocation_usd", "trend_cooldown_seconds",
+                        "daily_loss_limit_usd",
+                    ):
                         if key in payload:
                             state["settings"][key] = float(payload[key])
 
-                    if reinit:
-                        state["grid_state"]["initialized"] = False
-
                     save_state()
-                    await log_event(f"⚙️ Settings Updated (Grid: {state['settings']['grid_lower']}-{state['settings']['grid_upper']} | Size: ${state['settings']['trade_size_usd']})")
+                    await log_event(f"⚙️ Settings Updated")
                     await manager.broadcast_state()
             except json.JSONDecodeError:
                 pass
